@@ -1,0 +1,840 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Fire-Operator API — Мониторинг природных пожаров по данным ДЗЗ",
+    "summary": "REST API аналитической геосистемы мониторинга и оценки ущерба от пожаров",
+    "description": "\n### 🛰️ Геоинформационный программный комплекс двухэтапного мониторинга природных пожаров (КосмоХакатон 2026)\n\nКомплекс решает задачу оперативного обнаружения очагов горения и объективной оценки площадей пройденных огнём территорий по спутниковым данным:\n\n---\n\n#### 1. Модуль Active Fire (VIIRS, 375 м/пикс)\n* **Детекция открытого пламени:** Физико-контекстный алгоритм на основе радиационного контраста $\\Delta T = I_4 - I_5$ с оценкой локального фона в скользящем окне $21 \\times 21$.\n* **Фильтрация помех:** Отсечение солнечных зайчиков от водных поверхностей и кровель по коротковолновому ИК-каналу ($I_3$), разделение природных пожаров и стационарных техногенных факелов на месторождениях.\n\n#### 2. Модуль Burn Severity (Sentinel-2 L2A + Sentinel-1 SAR, 20 м/пикс)\n* **Выделение контуров гарей:** Разностные нормализованные спектральные индексы ($dNBR, RdNBR, dNDVI$).\n* **Защита от ложной пашни:** Анализ динамики красного спектра ($dRed$) — гарь и зола темнеют ($dRed < 0$), убранные зерновые и стерня светлеют ($dRed > 0$).\n* **Радиолокационная верификация:** Sentinel-1 C-SAR ($\\Delta VH, \\Delta VV$) обеспечивает устойчивость к задымлению и подтверждает утрату лесного полога.\n* **Классификация степени поражения:** Разделение на 3 категории (1 — слабая, 2 — средняя, 3 — сильная) с адаптивной калибровкой по типам покрова `ESA WorldCover`.\n\n#### 3. Геодезический модуль и экспорт\n* Автоматическое приведение координат к локальным проекциям **UTM 37N / 38N**.\n* Точный расчёт площадей с разрешением 20 м ($S_{\\\\text{pixel}} = 0.04\\\\text{ га}$).\n* Экспорт в стандарты **GeoJSON** и **ESRI Shapefile ZIP** с кодовой страницей UTF-8.\n\n---\n",
+    "contact": {
+      "name": "Команда разработки Fire-Operator (КосмоХакатон 2026)",
+      "url": "https://xn--80aa2abijcbdyq6a.xn--p1ai/"
+    },
+    "license": {
+      "name": "MIT License",
+      "url": "https://opensource.org/licenses/MIT"
+    },
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/analyze": {
+      "post": {
+        "tags": [
+          "fire-monitoring",
+          "Мониторинг пожаров (Monitoring)"
+        ],
+        "summary": "Запуск анализа территории по полигону и интервалу дат",
+        "description": "Принимает пространственно-временной запрос на мониторинг природных пожаров:\n- **polygon** или **bbox**: границы территории интереса (AOI) в WGS84;\n- **date_from** / **date_to**: временной диапазон анализа (YYYY-MM-DD);\n- **include_radar**: признак использования C-band SAR данных Sentinel-1.\n\nЗапускает асинхронный процесс обработки и мгновенно возвращает `task_id` для отслеживания.",
+        "operationId": "analyze_area_api_v1_analyze_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpatialTemporalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Задача успешно создана и поставлена в очередь обработки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskInitResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректные параметры запроса",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Ошибка валидации входного JSON (Pydantic)"
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{task_id}": {
+      "get": {
+        "tags": [
+          "fire-monitoring",
+          "Мониторинг пожаров (Monitoring)"
+        ],
+        "summary": "Проверка статуса обработки задачи",
+        "description": "Возвращает статус выполнения задачи мониторинга (`processing`, `completed`, `failed`)\nи процент прогресса выполнения.",
+        "operationId": "get_task_status_api_v1_tasks__task_id__get",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Текущее состояние выполнения задачи",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskStatusResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Указанный task_id не найден в системе",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/report/{task_id}": {
+      "get": {
+        "tags": [
+          "fire-monitoring",
+          "Аналитическая отчётность (Reports)"
+        ],
+        "summary": "Официальная аналитическая справка (площади в гектарах)",
+        "description": "Формирует официальную аналитическую справку по выгоревшим территориям:\n- **total_burned_area_ha**: суммарная площадь гари в гектарах;\n- **breakdown**: распределение площади по 3 степеням поражения (слабая, средняя, сильная) в га и %;\n- **active_thermal_anomalies_count**: количество подтвержденных природных термоточек AF;\n- **utm_zone**: использованная картографическая проекция UTM (37N / 38N).",
+        "operationId": "get_analytical_report_api_v1_report__task_id__get",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Аналитическая справка успешно сформирована",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticalReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Задача еще выполняется или завершилась с ошибкой",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Задача не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/export/geojson/{task_id}": {
+      "get": {
+        "tags": [
+          "fire-monitoring",
+          "Картографический экспорт (Export)"
+        ],
+        "summary": "Выгрузка векторных контуров в формате GeoJSON",
+        "description": "Выгружает векторные контуры пройденной огнем площади в формате **GeoJSON (RFC 7946, WGS84)**.\nКаждый полигон содержит атрибуты:\n- `contour_id`: уникальный код контура;\n- `severity_class`: степень поражения (1, 2, 3);\n- `severity_ru`: русскоязычное наименование степени;\n- `area_ha`: площадь полигона в гектарах.",
+        "operationId": "get_geojson_export_api_v1_export_geojson__task_id__get",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Векторный слой GeoJSON (RFC 7946, WGS84)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "application/geo+json": {}
+            }
+          },
+          "404": {
+            "description": "Файл не найден или задача еще обрабатывается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/export/shapefile/{task_id}": {
+      "get": {
+        "tags": [
+          "fire-monitoring",
+          "Картографический экспорт (Export)"
+        ],
+        "summary": "Выгрузка векторных контуров в формате ESRI Shapefile (ZIP)",
+        "description": "Выгружает готовый ZIP-архив с векторным слоем **ESRI Shapefile** для прямого импорта\nв профессиональные геоинформационные системы (QGIS, ArcGIS, Панорама).\n\nАрхив включает:\n- `.shp` — геометрии полигонов;\n- `.shx` — пространственный индекс;\n- `.dbf` — атрибутивная таблица (площадь, класс степени поражения);\n- `.prj` — информация о проекции (WGS84 / EPSG:4326);\n- `.cpg` — кодовая страница `UTF-8` (гарантирует корректную кириллицу в атрибутах).",
+        "operationId": "get_shapefile_export_api_v1_export_shapefile__task_id__get",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ZIP-архив Shapefile (.shp, .shx, .dbf, .prj, .cpg)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "application/zip": {}
+            }
+          },
+          "404": {
+            "description": "Файл не найден или задача еще обрабатывается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "tags": [
+          "fire-monitoring",
+          "Диагностика системы (Health)"
+        ],
+        "summary": "Диагностика работоспособности и доступности моделей",
+        "description": "Проверяет статус готовности сервиса к работе:\n- Наличие обученных весов моделей AF (`af_model.joblib`) и BS (`bs_model.joblib`);\n- Доступность директории хранения результатов и артефактов;\n- Версию запущенного программного комплекса.",
+        "operationId": "health_check_api_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Сервис активен и функционирует штатно",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/": {
+      "get": {
+        "tags": [
+          "Диагностика системы (Health)"
+        ],
+        "summary": "Корневой эндпоинт и навигация",
+        "description": "Возвращает информацию о сервисе и быстрые ссылки на Swagger UI и ReDoc.",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AnalyticalReport": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id",
+            "description": "Идентификатор задачи",
+            "example": "tsk_89f0a2c1"
+          },
+          "period": {
+            "type": "string",
+            "title": "Period",
+            "description": "Временной интервал анализа",
+            "example": "2024-05-01 — 2024-09-30"
+          },
+          "total_burned_area_ha": {
+            "type": "number",
+            "title": "Total Burned Area Ha",
+            "description": "Суммарная площадь, пройденная огнём (в гектарах)",
+            "example": 454.8
+          },
+          "breakdown": {
+            "items": {
+              "$ref": "#/components/schemas/SeverityBreakdown"
+            },
+            "type": "array",
+            "title": "Breakdown",
+            "description": "Детализация по 3 степеням поражения"
+          },
+          "active_thermal_anomalies_count": {
+            "type": "integer",
+            "title": "Active Thermal Anomalies Count",
+            "description": "Число подтвержденных термоточек активного горения (AF)",
+            "example": 14
+          },
+          "utm_zone": {
+            "type": "string",
+            "title": "Utm Zone",
+            "description": "Проекция UTM, в которой выполнялся расчет площади",
+            "example": "EPSG:32638"
+          },
+          "spatial_resolution_m": {
+            "type": "number",
+            "title": "Spatial Resolution M",
+            "description": "Пространственное разрешение исходных данных (м/пикс)",
+            "default": 20.0,
+            "example": 20.0
+          },
+          "calculation_method": {
+            "type": "string",
+            "title": "Calculation Method",
+            "description": "Методика расчета площадей",
+            "default": "Точный геодезический попиксельный учет проекции UTM (0.04 га/пикс)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "task_id",
+          "period",
+          "total_burned_area_ha",
+          "breakdown",
+          "active_thermal_anomalies_count",
+          "utm_zone"
+        ],
+        "title": "AnalyticalReport",
+        "description": "Официальная аналитическая справка по территории мониторинга.",
+        "example": {
+          "active_thermal_anomalies_count": 14,
+          "breakdown": [
+            {
+              "area_ha": 454.4,
+              "class_id": 1,
+              "name": "Слабая степень (Low)",
+              "percentage": 99.9
+            },
+            {
+              "area_ha": 0.4,
+              "class_id": 2,
+              "name": "Средняя степень (Moderate)",
+              "percentage": 0.1
+            },
+            {
+              "area_ha": 0.0,
+              "class_id": 3,
+              "name": "Сильная степень (High)",
+              "percentage": 0.0
+            }
+          ],
+          "calculation_method": "Точный геодезический попиксельный учет проекции UTM (0.04 га/пикс)",
+          "period": "2024-05-01 — 2024-09-30",
+          "spatial_resolution_m": 20.0,
+          "task_id": "tsk_89f0a2c1",
+          "total_burned_area_ha": 454.8,
+          "utm_zone": "EPSG:32638"
+        }
+      },
+      "ErrorDetail": {
+        "properties": {
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Текстовое описание причины ошибки",
+            "example": "Задача не найдена"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "ErrorDetail",
+        "description": "Схема описания ошибки API."
+      },
+      "GeoPolygon": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "description": "Тип геометрии GeoJSON. Должен быть 'Polygon'.",
+            "default": "Polygon",
+            "example": "Polygon"
+          },
+          "coordinates": {
+            "items": {
+              "items": {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "Coordinates",
+            "description": "Координаты вершин полигона [[[lon, lat], ...]] в проекции WGS84 (EPSG:4326). Первая и последняя точка должны совпадать.",
+            "example": [
+              [
+                [
+                  43.85,
+                  47.25
+                ],
+                [
+                  44.3,
+                  47.25
+                ],
+                [
+                  44.3,
+                  47.7
+                ],
+                [
+                  43.85,
+                  47.7
+                ],
+                [
+                  43.85,
+                  47.25
+                ]
+              ]
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "coordinates"
+        ],
+        "title": "GeoPolygon",
+        "description": "Полигон в формате GeoJSON (WGS84, RFC 7946).",
+        "example": {
+          "coordinates": [
+            [
+              [
+                43.85,
+                47.25
+              ],
+              [
+                44.3,
+                47.25
+              ],
+              [
+                44.3,
+                47.7
+              ],
+              [
+                43.85,
+                47.7
+              ],
+              [
+                43.85,
+                47.25
+              ]
+            ]
+          ],
+          "type": "Polygon"
+        }
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "Общий статус системы",
+            "default": "healthy",
+            "example": "healthy"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version",
+            "description": "Версия API сервиса",
+            "example": "1.0.0"
+          },
+          "models_loaded": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object",
+            "title": "Models Loaded",
+            "description": "Статус загрузки весов ML-моделей (af_model, bs_model)",
+            "example": {
+              "af_model": true,
+              "bs_model": true
+            }
+          },
+          "storage_accessible": {
+            "type": "boolean",
+            "title": "Storage Accessible",
+            "description": "Доступность дискового хранилища артефактов",
+            "example": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "version",
+          "models_loaded",
+          "storage_accessible"
+        ],
+        "title": "HealthResponse",
+        "description": "Схема диагностики состояния сервиса."
+      },
+      "SeverityBreakdown": {
+        "properties": {
+          "class_id": {
+            "type": "integer",
+            "title": "Class Id",
+            "description": "Идентификатор класса: 1 — слабая, 2 — средняя, 3 — сильная",
+            "example": 1
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Наименование степени поражения",
+            "example": "Слабая степень (Low)"
+          },
+          "area_ha": {
+            "type": "number",
+            "title": "Area Ha",
+            "description": "Площадь гари данной степени в гектарах",
+            "example": 454.4
+          },
+          "percentage": {
+            "type": "number",
+            "title": "Percentage",
+            "description": "Доля в процентах от суммарной выгоревшей площади",
+            "example": 99.9
+          }
+        },
+        "type": "object",
+        "required": [
+          "class_id",
+          "name",
+          "area_ha",
+          "percentage"
+        ],
+        "title": "SeverityBreakdown",
+        "description": "Статистика по конкретной степени поражения растительности."
+      },
+      "SpatialTemporalRequest": {
+        "properties": {
+          "polygon": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GeoPolygon"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Произвольный полигон исследуемой территории в формате GeoJSON."
+          },
+          "bbox": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bbox",
+            "description": "Ограничивающий прямоугольник (BBox) в формате [min_lon, min_lat, max_lon, max_lat] в градусах WGS84.",
+            "example": [
+              43.0,
+              47.0,
+              45.5,
+              48.5
+            ]
+          },
+          "date_from": {
+            "type": "string",
+            "title": "Date From",
+            "description": "Начальная дата периода анализа (формат YYYY-MM-DD).",
+            "example": "2024-05-01"
+          },
+          "date_to": {
+            "type": "string",
+            "title": "Date To",
+            "description": "Конечная дата периода анализа (формат YYYY-MM-DD).",
+            "example": "2024-09-30"
+          },
+          "include_radar": {
+            "type": "boolean",
+            "title": "Include Radar",
+            "description": "Флаг использования радиолокационных каналов Sentinel-1 SAR (VV/VH) для верификации контуров сквозь дым и облака.",
+            "default": true,
+            "example": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "date_from",
+          "date_to"
+        ],
+        "title": "SpatialTemporalRequest",
+        "description": "Параметры пространственно-временного запроса на мониторинг пожаров.",
+        "example": {
+          "bbox": [
+            43.0,
+            47.0,
+            45.5,
+            48.5
+          ],
+          "date_from": "2024-05-01",
+          "date_to": "2024-09-30",
+          "include_radar": true
+        }
+      },
+      "TaskInitResponse": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id",
+            "description": "Уникальный идентификатор задачи анализа",
+            "example": "tsk_89f0a2c1"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "Текущий статус выполнения задачи",
+            "default": "processing",
+            "example": "processing"
+          },
+          "estimated_time_sec": {
+            "type": "number",
+            "title": "Estimated Time Sec",
+            "description": "Оценочное время обработки в секундах",
+            "example": 3.5
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Информационное сообщение системы",
+            "example": "Запрос принят в обработку."
+          }
+        },
+        "type": "object",
+        "required": [
+          "task_id",
+          "estimated_time_sec",
+          "message"
+        ],
+        "title": "TaskInitResponse",
+        "description": "Ответ на постановку задачи мониторинга."
+      },
+      "TaskStatusResponse": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id",
+            "description": "Идентификатор задачи",
+            "example": "tsk_89f0a2c1"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "Статус: processing, completed или failed",
+            "example": "completed"
+          },
+          "progress": {
+            "type": "integer",
+            "title": "Progress",
+            "description": "Процент завершения (0..100)",
+            "example": 100
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At",
+            "description": "Время создания задачи (ISO 8601)",
+            "example": "2026-09-18T14:30:00Z"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At",
+            "description": "Время завершения обработки",
+            "example": "2026-09-18T14:30:03Z"
+          }
+        },
+        "type": "object",
+        "required": [
+          "task_id",
+          "status",
+          "progress",
+          "created_at"
+        ],
+        "title": "TaskStatusResponse",
+        "description": "Статус выполнения фоновой задачи."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Мониторинг пожаров (Monitoring)",
+      "description": "**Оперативный и ретроспективный мониторинг.** Прием пространственно-временных запросов (BBox или полигон GeoJSON), асинхронная постановка в очередь и опрос статуса выполнения конвейера ДЗЗ."
+    },
+    {
+      "name": "Аналитическая отчётность (Reports)",
+      "description": "**Официальная статистика и расчет ущерба.** Формирование сводной справки: суммарная площадь гари в гектарах, распределение по 3 степеням поражения (слабая, средняя, сильная) и число зарегистрированных термоточек активного горения."
+    },
+    {
+      "name": "Картографический экспорт (Export)",
+      "description": "**Интеграция с внешними ГИС (QGIS, ArcGIS, Региональные системы).** Выгрузка полигональных контуров гарей в форматах **GeoJSON (WGS84, RFC 7946)** и **ESRI Shapefile ZIP** (.shp, .shx, .dbf, .prj, .cpg) со всеми атрибутами степеней и площадей."
+    },
+    {
+      "name": "Диагностика системы (Health)",
+      "description": "**Мониторинг состояния сервиса.** Проверка доступности весов ML-моделей (AF и BS) и файлового хранилища."
+    }
+  ]
+}
