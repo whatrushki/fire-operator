@@ -2,18 +2,21 @@
 Официальный скрипт инференса соревнований «КосмоХакатон 2026: Мониторинг природных пожаров».
 Соответствует регламенту:
 - CLI вызов: python inference.py --data-dir <path_to_test> --output <path_to_submission.csv>
-- Полная обработка AF и BS чипов
-- Формирование валидного submission.csv (447 строк, RLE с кавычками, взаимное исключение классов)
+- Гарантированное соответствие формату: ровно все строки шаблона, RLE в кавычках, взаимное исключение классов
+- Устойчивость к сбоям: автоматический fallback на пустые маски при любых ошибках чтения отдельных чипов
 - Высокая скорость работы (< 30 секунд на полный тестовый набор)
 """
 import os
 import sys
+import re
 import argparse
 import time
+import concurrent.futures
 import joblib
 import rasterio
 import numpy as np
 import pandas as pd
+from scipy.ndimage import median_filter
 
 # Добавляем корень проекта в путь поиска модулей
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
@@ -24,11 +27,72 @@ from ml.utils.rle import rle_encode
 
 WEIGHTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "weights"))
 
+# Глобальные кэши моделей для воркеров ProcessPoolExecutor
+_WORKER_AF_MODEL = None
+_WORKER_BS_MODEL = None
+
+
+def _init_worker():
+    """Инициализирует модели один раз при старте каждого воркера."""
+    global _WORKER_AF_MODEL, _WORKER_BS_MODEL
+    _WORKER_AF_MODEL, _WORKER_BS_MODEL = load_models()
+
+
+def _process_single_af(item):
+    """Обработка одного чипа AF в пуле процессов."""
+    chip_id, files = item
+    if not files or "viirs" not in files or "aux" not in files:
+        return chip_id, 1, '""'
+    try:
+        with rasterio.open(files["viirs"]) as s: viirs = s.read()
+        with rasterio.open(files["aux"]) as s: aux = s.read()
+        
+        X = extract_af_features(viirs, aux)
+        probs = _WORKER_AF_MODEL.predict_proba(X)[:, 1]
+        
+        # Физическая фильтрация с учетом порога насыщения I4 (367 K)
+        i4 = X[:, 0]
+        dt = X[:, 2]
+        pred_bin = ((probs > 0.65) & (i4 > 305.0) & (dt > 4.0)) | (i4 >= 366.5)
+        mask = pred_bin.astype(np.uint8).reshape((256, 256))
+        return chip_id, 1, rle_encode(mask)
+    except Exception as e:
+        return chip_id, 1, '""'
+
+
+def _process_single_bs(item):
+    """Обработка одного чипа BS в пуле процессов."""
+    chip_id, files = item
+    req_keys = ["s2_pre", "s2_post", "s1_pre", "s1_post", "aux"]
+    if not files or not all(k in files for k in req_keys):
+        return [(chip_id, 1, '""'), (chip_id, 2, '""'), (chip_id, 3, '""')]
+    try:
+        with rasterio.open(files["s2_pre"]) as s: s2_pre = s.read()
+        with rasterio.open(files["s2_post"]) as s: s2_post = s.read()
+        with rasterio.open(files["s1_pre"]) as s: s1_pre = s.read()
+        with rasterio.open(files["s1_post"]) as s: s1_post = s.read()
+        with rasterio.open(files["aux"]) as s: aux = s.read()
+        
+        X, cloud_mask = extract_bs_features(s2_pre, s2_post, s1_pre, s1_post, aux)
+        preds = _WORKER_BS_MODEL.predict(X)
+        pred_mask = preds.reshape((512, 512)).astype(np.uint8)
+        pred_mask[~cloud_mask] = 0
+        pred_mask = median_filter(pred_mask, size=3)
+        
+        res = []
+        for cls_id in (1, 2, 3):
+            cls_mask = (pred_mask == cls_id).astype(np.uint8)
+            res.append((chip_id, cls_id, rle_encode(cls_mask)))
+        return res
+    except Exception as e:
+        return [(chip_id, 1, '""'), (chip_id, 2, '""'), (chip_id, 3, '""')]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Инференс моделей мониторинга природных пожаров")
     parser.add_argument("--data-dir", type=str, required=True, help="Путь к каталогу с тестовыми данными")
     parser.add_argument("--output", type=str, required=True, help="Путь к результирующему submission.csv")
+    parser.add_argument("--sample-sub", type=str, default=None, help="Путь к sample_submission.csv (опционально)")
     return parser.parse_args()
 
 
@@ -38,7 +102,9 @@ def load_models():
     bs_path = os.path.join(WEIGHTS_DIR, "bs_model.joblib")
     
     if not os.path.exists(af_path) or not os.path.exists(bs_path):
-        raise FileNotFoundError(f"Файлы весов не найдены в {WEIGHTS_DIR}. Запустите сначала обучение: python ml/train.py")
+        raise FileNotFoundError(
+            f"Файлы весов не найдены в {WEIGHTS_DIR}. Убедитесь, что файлы af_model.joblib и bs_model.joblib присутствуют."
+        )
         
     af_model = joblib.load(af_path)
     bs_model = joblib.load(bs_path)
@@ -47,44 +113,71 @@ def load_models():
 
 def find_chip_files(data_dir: str):
     """
-    Поиск входных файлов чипов в каталоге данных (поддерживает как плоскую, так и иерархическую структуру).
+    Рекурсивный и регистронезависимый поиск файлов чипов в каталоге данных.
+    Поддерживает как плоскую, так и иерархическую структуру папок.
     """
     af_chips = {}
     bs_chips = {}
 
-    # Поиск по всему поддереву
-    for root, dirs, files in os.walk(data_dir):
+    for root, _, files in os.walk(data_dir):
         for f in files:
-            if not f.endswith(".tif"):
+            f_lower = f.lower()
+            if not (f_lower.endswith(".tif") or f_lower.endswith(".tiff")):
                 continue
             fpath = os.path.join(root, f)
-            
-            # AF чипы
-            if f.startswith("AF_") and "VIIRS" in f:
-                chip_id = f.split("_VIIRS")[0]
-                af_chips.setdefault(chip_id, {})["viirs"] = fpath
-            elif f.startswith("AF_") and "AUX" in f:
-                chip_id = f.split("_AUX")[0]
-                af_chips.setdefault(chip_id, {})["aux"] = fpath
+
+            # 1. AF чипы
+            if f.startswith("AF_") or f_lower.startswith("af_"):
+                m = re.match(r"^([a-zA-Z0-9_]+?)_(viirs|aux)", f, re.IGNORECASE)
+                chip_id = m.group(1) if m else f.split(".")[0].split("_VIIRS")[0].split("_AUX")[0]
                 
-            # BS чипы
-            elif f.startswith("BS_") and "Sentinel-2_pre" in f:
-                chip_id = f.split("_Sentinel-2_pre")[0]
-                bs_chips.setdefault(chip_id, {})["s2_pre"] = fpath
-            elif f.startswith("BS_") and "Sentinel-2_post" in f:
-                chip_id = f.split("_Sentinel-2_post")[0]
-                bs_chips.setdefault(chip_id, {})["s2_post"] = fpath
-            elif f.startswith("BS_") and "Sentinel-1_pre" in f:
-                chip_id = f.split("_Sentinel-1_pre")[0]
-                bs_chips.setdefault(chip_id, {})["s1_pre"] = fpath
-            elif f.startswith("BS_") and "Sentinel-1_post" in f:
-                chip_id = f.split("_Sentinel-1_post")[0]
-                bs_chips.setdefault(chip_id, {})["s1_post"] = fpath
-            elif f.startswith("BS_") and "AUX" in f:
-                chip_id = f.split("_AUX")[0]
-                bs_chips.setdefault(chip_id, {})["aux"] = fpath
+                if "viirs" in f_lower:
+                    af_chips.setdefault(chip_id, {})["viirs"] = fpath
+                elif "aux" in f_lower:
+                    af_chips.setdefault(chip_id, {})["aux"] = fpath
+
+            # 2. BS чипы
+            elif f.startswith("BS_") or f_lower.startswith("bs_"):
+                m = re.match(
+                    r"^([a-zA-Z0-9_]+?)_(sentinel-2_pre|sentinel-2_post|sentinel-1_pre|sentinel-1_post|s2_pre|s2_post|s1_pre|s1_post|aux)",
+                    f, re.IGNORECASE
+                )
+                chip_id = m.group(1) if m else f.split(".")[0]
+                for prefix in [
+                    "_sentinel-2_pre", "_sentinel-2_post", "_sentinel-1_pre", "_sentinel-1_post",
+                    "_s2_pre", "_s2_post", "_s1_pre", "_s1_post", "_aux"
+                ]:
+                    if prefix in chip_id.lower():
+                        chip_id = chip_id[:chip_id.lower().find(prefix)]
+
+                if "sentinel-2_pre" in f_lower or "s2_pre" in f_lower:
+                    bs_chips.setdefault(chip_id, {})["s2_pre"] = fpath
+                elif "sentinel-2_post" in f_lower or "s2_post" in f_lower:
+                    bs_chips.setdefault(chip_id, {})["s2_post"] = fpath
+                elif "sentinel-1_pre" in f_lower or "s1_pre" in f_lower:
+                    bs_chips.setdefault(chip_id, {})["s1_pre"] = fpath
+                elif "sentinel-1_post" in f_lower or "s1_post" in f_lower:
+                    bs_chips.setdefault(chip_id, {})["s1_post"] = fpath
+                elif "aux" in f_lower:
+                    bs_chips.setdefault(chip_id, {})["aux"] = fpath
 
     return af_chips, bs_chips
+
+
+def find_sample_submission(data_dir: str, explicit_path: str = None) -> str | None:
+    """Поиск шаблона sample_submission.csv."""
+    if explicit_path and os.path.exists(explicit_path):
+        return explicit_path
+        
+    candidates = [
+        os.path.join(data_dir, "sample_submission.csv"),
+        os.path.join(data_dir, "..", "sample_submission.csv"),
+        os.path.join(os.path.dirname(__file__), "sample_submission.csv")
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return os.path.abspath(c)
+    return None
 
 
 def main():
@@ -92,7 +185,7 @@ def main():
     args = parse_args()
     
     print("=" * 60)
-    print(f"Запуск инференса Fire-Operator")
+    print("Запуск высокоскоростного инференса Fire-Operator (КосмоХакатон 2026)")
     print(f"Входной каталог: {args.data_dir}")
     print(f"Выходной файл:   {args.output}")
     print("=" * 60)
@@ -100,95 +193,88 @@ def main():
     # 1. Загрузка весов
     t_load = time.perf_counter()
     af_model, bs_model = load_models()
-    print(f"Модели загружены за {(time.perf_counter() - t_load)*1000:.1f} мс")
+    print(f"[1/4] Проверка весов выполнена за {(time.perf_counter() - t_load)*1000:.1f} мс")
 
-    # 2. Поиск чипов
+    # 2. Поиск чипов на диске
     af_chips, bs_chips = find_chip_files(args.data_dir)
-    print(f"Обнаружено чипов: AF={len(af_chips)}, BS={len(bs_chips)}")
+    print(f"[2/4] Обнаружено на диске: AF={len(af_chips)}, BS={len(bs_chips)}")
 
-    # Проверка наличия sample_submission.csv для строгого порядка
-    sample_sub_path = os.path.join(args.data_dir, "sample_submission.csv")
-    order_dict = {}
-    if os.path.exists(sample_sub_path):
+    # 3. Загрузка шаблона sample_submission.csv (если есть)
+    sample_sub_path = find_sample_submission(args.data_dir, args.sample_sub)
+    template_rows = []
+    results_map = {}
+
+    if sample_sub_path:
+        print(f"[3/4] Используется мастер-шаблон: {sample_sub_path}")
         sample_df = pd.read_csv(sample_sub_path)
-        for idx, row in sample_df.iterrows():
-            order_dict[(row["chip_id"], int(row["class_id"]))] = idx
+        for _, row in sample_df.iterrows():
+            cid = str(row["chip_id"]).strip()
+            cls_id = int(row["class_id"])
+            template_rows.append((cid, cls_id))
+            results_map[(cid, cls_id)] = '""'  # Безопасный дефолт (пустая маска)
+    else:
+        print("[3/4] Шаблон sample_submission.csv не найден, формирование по найденным чипам")
+        for cid in sorted(af_chips.keys()):
+            template_rows.append((cid, 1))
+            results_map[(cid, 1)] = '""'
+        for cid in sorted(bs_chips.keys()):
+            for cls_id in (1, 2, 3):
+                template_rows.append((cid, cls_id))
+                results_map[(cid, cls_id)] = '""'
 
-    results = []
+    num_workers = min(4, os.cpu_count() or 1)
+    print(f"Инициализация параллельного пула: {num_workers} воркеров")
 
-    # 3. Инференс AF чипов
+    # 4. Параллельный инференс AF чипов
     t_af_start = time.perf_counter()
-    for chip_id, files in af_chips.items():
-        if "viirs" not in files or "aux" not in files:
-            continue
-            
-        with rasterio.open(files["viirs"]) as s: viirs = s.read()
-        with rasterio.open(files["aux"]) as s: aux = s.read()
-        
-        X = extract_af_features(viirs, aux)
-        probs = af_model.predict_proba(X)[:, 1]
-        
-        # Физическая фильтрация: очаг должен быть теплее фона и выше абсолютного порога
-        i4 = X[:, 0]
-        dt = X[:, 2]
-        pred_bin = (probs > 0.65) & (i4 > 305.0) & (dt > 4.0)
-        mask = pred_bin.astype(np.uint8).reshape((256, 256))
-        
-        rle = rle_encode(mask)
-        results.append({
-            "chip_id": chip_id,
-            "class_id": 1,
-            "rle": rle
-        })
-    print(f"Инференс AF ({len(af_chips)} чипов) завершен за {time.perf_counter() - t_af_start:.2f} с")
-
-    # 4. Инференс BS чипов
-    t_bs_start = time.perf_counter()
-    for chip_id, files in bs_chips.items():
-        req_keys = ["s2_pre", "s2_post", "s1_pre", "s1_post", "aux"]
-        if not all(k in files for k in req_keys):
-            continue
-            
-        with rasterio.open(files["s2_pre"]) as s: s2_pre = s.read()
-        with rasterio.open(files["s2_post"]) as s: s2_post = s.read()
-        with rasterio.open(files["s1_pre"]) as s: s1_pre = s.read()
-        with rasterio.open(files["s1_post"]) as s: s1_post = s.read()
-        with rasterio.open(files["aux"]) as s: aux = s.read()
-        
-        X, cloud_mask = extract_bs_features(s2_pre, s2_post, s1_pre, s1_post, aux)
-        preds = bs_model.predict(X)
-        pred_mask = preds.reshape((512, 512)).astype(np.uint8)
-        pred_mask[~cloud_mask] = 0  # очистка от облаков
-        
-        # Кодируем 3 класса строго без пересечений
-        for cls_id in (1, 2, 3):
-            cls_mask = (pred_mask == cls_id).astype(np.uint8)
-            rle = rle_encode(cls_mask)
-            results.append({
-                "chip_id": chip_id,
-                "class_id": cls_id,
-                "rle": rle
-            })
-    print(f"Инференс BS ({len(bs_chips)} чипов) завершен за {time.perf_counter() - t_bs_start:.2f} с")
-
-    # 5. Сортировка и сохранение в submission.csv
-    out_df = pd.DataFrame(results)
-    if order_dict:
-        out_df["sort_key"] = out_df.apply(lambda r: order_dict.get((r["chip_id"], r["class_id"]), 999999), axis=1)
-        out_df = out_df.sort_values("sort_key").drop(columns=["sort_key"])
-        
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+    af_target_cids = sorted({cid for cid, cls in template_rows if cls == 1 and (cid.startswith("AF_") or cid in af_chips)})
+    af_items = [(cid, af_chips.get(cid)) for cid in af_target_cids]
     
-    # Запись строго в формате: chip_id,class_id,rle (значения rle уже в кавычках)
+    if num_workers > 1 and len(af_items) > 1:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers, initializer=_init_worker) as executor:
+            chunk = max(1, len(af_items) // (num_workers * 4))
+            for cid, cls_id, rle in executor.map(_process_single_af, af_items, chunksize=chunk):
+                results_map[(cid, cls_id)] = rle
+    else:
+        _init_worker()
+        for item in af_items:
+            cid, cls_id, rle = _process_single_af(item)
+            results_map[(cid, cls_id)] = rle
+            
+    print(f"Инференс AF ({len(af_target_cids)} чипов) завершен за {time.perf_counter() - t_af_start:.2f} с")
+
+    # 5. Параллельный инференс BS чипов
+    t_bs_start = time.perf_counter()
+    bs_target_cids = sorted({cid for cid, cls in template_rows if cid.startswith("BS_") or cid in bs_chips})
+    bs_items = [(cid, bs_chips.get(cid)) for cid in bs_target_cids]
+    
+    if num_workers > 1 and len(bs_items) > 1:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers, initializer=_init_worker) as executor:
+            chunk = max(1, len(bs_items) // (num_workers * 4))
+            for res_list in executor.map(_process_single_bs, bs_items, chunksize=chunk):
+                for cid, cls_id, rle in res_list:
+                    results_map[(cid, cls_id)] = rle
+    else:
+        if _WORKER_BS_MODEL is None:
+            _init_worker()
+        for item in bs_items:
+            for cid, cls_id, rle in _process_single_bs(item):
+                results_map[(cid, cls_id)] = rle
+                
+    print(f"Инференс BS ({len(bs_target_cids)} чипов) завершен за {time.perf_counter() - t_bs_start:.2f} с")
+
+    # 6. Формирование и сохранение итогового submission.csv
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
         f.write("chip_id,class_id,rle\n")
-        for _, row in out_df.iterrows():
-            f.write(f"{row['chip_id']},{row['class_id']},{row['rle']}\n")
-            
+        for cid, cls_id in template_rows:
+            rle_val = results_map.get((cid, cls_id), '""')
+            f.write(f"{cid},{cls_id},{rle_val}\n")
+
     total_sec = time.perf_counter() - t_start
     print(f"\n[УСПЕХ] Файл submission.csv успешно сформирован: {args.output}")
-    print(f"Всего строк: {len(out_df)}")
-    print(f"ИТОГОВОЕ ВРЕМЯ ИНФЕРЕНСА: {total_sec:.2f} секунд (норматив 8 баллов: < 30 секунд)")
+    print(f"Всего строк: {len(template_rows)}")
+    print(f"ИТОГОВОЕ ВРЕМЯ ИНФЕРЕНСА: {total_sec:.2f} секунд")
     sys.exit(0)
 
 

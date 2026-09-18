@@ -1,5 +1,5 @@
 """
-Экстракция физико-спектральных признаков для задачи BS (Burn Severity).
+Экстракция физико-спектральных и пространственно-контекстных признаков для задачи BS (Burn Severity).
 Каналы Sentinel-2 (L2A, uint16, масштаб 0-10000):
   1..3: B2 (Blue), B3 (Green), B4 (Red)
   4..6: B5, B6, B7 (Red Edge)
@@ -12,6 +12,7 @@
   1: dem, 2: slope, 3: landcover
 """
 import numpy as np
+from scipy.ndimage import uniform_filter
 
 
 def extract_bs_features(
@@ -22,7 +23,7 @@ def extract_bs_features(
     aux: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Извлекает нормализованные спектральные и радарные признаки для чипа BS (512x512).
+    Извлекает спектральные, радарные и пространственно-контекстные признаки для чипа BS (512x512).
     
     Returns:
         X: array (512*512, N_features) float32
@@ -42,7 +43,7 @@ def extract_bs_features(
     post_b12 = s2_post[8].astype(np.float32) / 10000.0
     post_scl = s2_post[9]
     
-    # 1. Индексы NBR и dNBR
+    # 1. Спектральные индексы гари
     nbr_pre = (pre_b8a - pre_b12) / (pre_b8a + pre_b12 + 1e-5)
     nbr_post = (post_b8a - post_b12) / (post_b8a + post_b12 + 1e-5)
     dnbr = nbr_pre - nbr_post
@@ -50,7 +51,7 @@ def extract_bs_features(
     # Относительный dNBR (RdNBR)
     rdnbr = dnbr / np.sqrt(np.maximum(np.abs(nbr_pre), 1e-4))
     
-    # 2. Индексы NDVI и dNDVI (хлорофилл)
+    # 2. Индексы вегетации (NDVI)
     ndvi_pre = (pre_b8a - pre_b4) / (pre_b8a + pre_b4 + 1e-5)
     ndvi_post = (post_b8a - post_b4) / (post_b8a + post_b4 + 1e-5)
     dndvi = ndvi_pre - ndvi_post
@@ -60,8 +61,7 @@ def extract_bs_features(
     d_red = post_b4 - pre_b4
     d_swir = post_b12 - pre_b12
     
-    # 4. Радар Sentinel-1: дельта кросс-поляризации VH (дБ)
-    # Потеря крон деревьев резко снижает объемное рассеяние VH
+    # 4. Радар Sentinel-1: дельта кросс-поляризации VH и со-поляризации VV (дБ)
     vh_pre = s1_pre[1].astype(np.float32) / 100.0
     vh_post = s1_post[1].astype(np.float32) / 100.0
     d_vh = vh_post - vh_pre
@@ -69,8 +69,17 @@ def extract_bs_features(
     vv_pre = s1_pre[0].astype(np.float32) / 100.0
     vv_post = s1_post[0].astype(np.float32) / 100.0
     d_vv = vv_post - vv_pre
+    diff_vh_vv = d_vh - d_vv
     
-    # 5. Вспомогательные данные (AUX)
+    # 5. Пространственно-контекстные признаки (скользящие окна 3x3 и 5x5)
+    # Позволяют классификатору учитывать связность контура гари и устраняют шум одиночных пикселей
+    dnbr_mean3 = uniform_filter(dnbr, size=3, mode='reflect')
+    dnbr_mean5 = uniform_filter(dnbr, size=5, mode='reflect')
+    dndvi_mean3 = uniform_filter(dndvi, size=3, mode='reflect')
+    dred_mean3 = uniform_filter(d_red, size=3, mode='reflect')
+    dvh_mean3 = uniform_filter(d_vh, size=3, mode='reflect')
+    
+    # 6. Вспомогательные данные (AUX)
     dem = aux[0].astype(np.float32)
     slope = aux[1].astype(np.float32)
     landcover = aux[2]
@@ -81,13 +90,13 @@ def extract_bs_features(
     is_crop = (landcover == 40).astype(np.float32)
     is_water = (landcover == 80).astype(np.float32)
     
-    # 6. Маска облачности и теней по SCL: 3=тень, 8,9,10=облака
+    # 7. Маска облачности и теней по SCL: 3=тень, 8,9,10=облака
     # Защита светлых почв: облако маркируется, только если синий канал post_b2 > 0.15
     cloud_pre = np.isin(pre_scl, [3, 8, 9, 10])
     cloud_post = np.isin(post_scl, [3, 8, 9, 10]) & (post_b2 > 0.15)
     cloud_mask = ~(cloud_pre | cloud_post)
     
-    # 7. Формирование матрицы признаков
+    # 8. Формирование матрицы признаков (22 признака)
     features = [
         dnbr.ravel(),
         rdnbr.ravel(),
@@ -99,6 +108,12 @@ def extract_bs_features(
         post_b12.ravel(),
         d_vh.ravel(),
         d_vv.ravel(),
+        diff_vh_vv.ravel(),
+        dnbr_mean3.ravel(),
+        dnbr_mean5.ravel(),
+        dndvi_mean3.ravel(),
+        dred_mean3.ravel(),
+        dvh_mean3.ravel(),
         dem.ravel(),
         slope.ravel(),
         is_forest.ravel(),

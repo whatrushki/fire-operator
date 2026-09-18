@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fire-Operator — Геоинформационная система мониторинга пожаров</title>
+  
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <!-- Google Fonts: Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      background: #1e293b;
+      border-bottom: 1px solid #334155;
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      z-index: 1000;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand-icon {
+      font-size: 24px;
+    }
+    .brand-title {
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      color: #f8fafc;
+    }
+    .brand-badge {
+      background: rgba(239, 68, 68, 0.2);
+      color: #ef4444;
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 12px;
+      text-transform: uppercase;
+    }
+    .nav-links {
+      display: flex;
+      gap: 12px;
+    }
+    .nav-links a {
+      color: #94a3b8;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 500;
+      padding: 6px 12px;
+      border-radius: 6px;
+      border: 1px solid #334155;
+      transition: all 0.2s ease;
+    }
+    .nav-links a:hover {
+      background: #334155;
+      color: #f8fafc;
+    }
+    #main-container {
+      display: flex;
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+    #map {
+      flex: 1;
+      height: 100%;
+      background: #090d16;
+    }
+    /* Control Panel */
+    #sidebar {
+      width: 380px;
+      background: rgba(30, 41, 59, 0.95);
+      backdrop-filter: blur(12px);
+      border-right: 1px solid #334155;
+      display: flex;
+      flex-direction: column;
+      z-index: 500;
+      overflow-y: auto;
+      padding: 20px;
+      gap: 18px;
+      box-shadow: 4px 0 24px rgba(0, 0, 0, 0.4);
+    }
+    .panel-section {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 14px;
+    }
+    .section-title {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #94a3b8;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .form-group {
+      margin-bottom: 10px;
+    }
+    .form-group:last-child {
+      margin-bottom: 0;
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: #cbd5e1;
+      margin-bottom: 4px;
+    }
+    select, input[type="text"], input[type="date"] {
+      width: 100%;
+      background: #1e293b;
+      border: 1px solid #475569;
+      color: #f8fafc;
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-family: inherit;
+    }
+    select:focus, input:focus {
+      outline: none;
+      border-color: #3b82f6;
+    }
+    .row-inputs {
+      display: flex;
+      gap: 8px;
+    }
+    .row-inputs > div {
+      flex: 1;
+    }
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .checkbox-group input {
+      accent-color: #3b82f6;
+      width: 16px;
+      height: 16px;
+    }
+    .checkbox-group label {
+      margin-bottom: 0;
+      cursor: pointer;
+    }
+    .btn-submit {
+      width: 100%;
+      background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+      color: #ffffff;
+      border: none;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+      transition: all 0.2s ease;
+    }
+    .btn-submit:hover {
+      background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+      box-shadow: 0 6px 16px rgba(239, 68, 68, 0.4);
+    }
+    .btn-submit:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    /* Report card */
+    #report-card {
+      display: none;
+    }
+    .metric-hero {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #1e293b;
+      margin-bottom: 10px;
+    }
+    .metric-value {
+      font-size: 26px;
+      font-weight: 700;
+      color: #f8fafc;
+    }
+    .metric-label {
+      font-size: 11px;
+      color: #94a3b8;
+    }
+    .sev-bar {
+      margin-bottom: 8px;
+    }
+    .sev-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      margin-bottom: 3px;
+    }
+    .progress-track {
+      background: #1e293b;
+      height: 8px;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.6s ease;
+    }
+    .fill-low { background: #ffd166; }
+    .fill-mod { background: #f77f00; }
+    .fill-high { background: #d62828; }
+    
+    .btn-export-group {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .btn-export {
+      flex: 1;
+      padding: 8px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 6px;
+      text-decoration: none;
+      text-align: center;
+      transition: all 0.2s ease;
+    }
+    .btn-geojson {
+      background: #0284c7;
+      color: #ffffff;
+      border: 1px solid #0369a1;
+    }
+    .btn-geojson:hover { background: #0369a1; }
+    .btn-shp {
+      background: #16a34a;
+      color: #ffffff;
+      border: 1px solid #15803d;
+    }
+    .btn-shp:hover { background: #15803d; }
+    .btn-report {
+      background: #8b5cf6;
+      color: #ffffff;
+      border: 1px solid #7c3aed;
+    }
+    .btn-report:hover { background: #7c3aed; }
+
+    /* Map Legend */
+    .legend-box {
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(8px);
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      font-size: 12px;
+      color: #e2e8f0;
+      line-height: 1.5;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .legend-color {
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+    }
+    .legend-circle {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #ef4444;
+      border: 2px solid #ffffff;
+      box-shadow: 0 0 8px #ef4444;
+    }
+    
+    /* Status banner */
+    #status-banner {
+      display: none;
+      padding: 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      background: rgba(59, 130, 246, 0.2);
+      border: 1px solid #3b82f6;
+      color: #93c5fd;
+      text-align: center;
+    }
+    .spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top-color: #fff;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <span class="brand-icon">🛰️</span>
+      <div>
+        <div class="brand-title">Fire-Operator <span class="brand-badge">КосмоХакатон 2026</span></div>
+      </div>
+    </div>
+    <div class="nav-links">
+      <a href="/docs" target="_blank">📖 Swagger API</a>
+      <a href="/redoc" target="_blank">📚 ReDoc</a>
+      <a href="https://космохакатон.рф" target="_blank">🌐 Официальный сайт</a>
+    </div>
+  </header>
+
+  <div id="main-container">
+    <!-- Sidebar / Control Panel -->
+    <div id="sidebar">
+      <div class="panel-section">
+        <div class="section-title">📍 Территория мониторинга (AOI)</div>
+        <div class="form-group">
+          <label for="region-select">Предустановленные регионы Юга России:</label>
+          <select id="region-select">
+            <option value="volgograd">Волгоградская область (Цимлянское вдхр.)</option>
+            <option value="kalmykia">Республика Калмыкия (Степные массивы)</option>
+            <option value="rostov">Ростовская область (Пойма Нижнего Дона)</option>
+            <option value="astrakhan">Астраханская область (Волго-Ахтубинская пойма)</option>
+            <option value="custom">Пользовательский BBox (WGS84)</option>
+          </select>
+        </div>
+        <div id="custom-bbox-fields" style="display: none;">
+          <div class="form-group">
+            <label>BBox [min_lon, min_lat, max_lon, max_lat]:</label>
+            <input type="text" id="bbox-input" value="43.0, 47.0, 45.5, 48.5" />
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-title">⏱️ Временной интервал и сенсоры</div>
+        <div class="form-group">
+          <div class="row-inputs">
+            <div>
+              <label for="date-from">Дата «до» (Pre):</label>
+              <input type="date" id="date-from" value="2024-06-01" />
+            </div>
+            <div>
+              <label for="date-to">Дата «после» (Post):</label>
+              <input type="date" id="date-to" value="2024-09-15" />
+            </div>
+          </div>
+        </div>
+        <div class="checkbox-group">
+          <input type="checkbox" id="chk-radar" checked />
+          <label for="chk-radar">Радиолокация Sentinel-1 SAR (сквозь дым)</label>
+        </div>
+      </div>
+
+      <button id="btn-run" class="btn-submit">
+        <span>🚀 Запустить космический анализ</span>
+      </button>
+
+      <div id="status-banner">
+        <span class="spinner"></span> <span id="status-text">Запрос обрабатывается конвейером ДЗЗ...</span>
+      </div>
+
+      <!-- Analytical Report -->
+      <div id="report-card" class="panel-section">
+        <div class="section-title">📊 Аналитическая справка</div>
+        
+        <div class="metric-hero">
+          <div>
+            <div class="metric-value" id="res-total-area">0.00 га</div>
+            <div class="metric-label">Суммарная площадь гари</div>
+          </div>
+          <div style="text-align: right;">
+            <div class="metric-value" style="color: #ef4444;" id="res-af-count">0</div>
+            <div class="metric-label">Термоточек горения (AF)</div>
+          </div>
+        </div>
+
+        <div style="margin-bottom: 12px;">
+          <div class="sev-bar">
+            <div class="sev-header">
+              <span style="color: #ffd166;">Слабая степень (Low)</span>
+              <span id="res-sev1-val">0.0 га (0%)</span>
+            </div>
+            <div class="progress-track"><div id="fill-sev1" class="progress-fill fill-low" style="width: 0%;"></div></div>
+          </div>
+
+          <div class="sev-bar">
+            <div class="sev-header">
+              <span style="color: #f77f00;">Средняя степень (Moderate)</span>
+              <span id="res-sev2-val">0.0 га (0%)</span>
+            </div>
+            <div class="progress-track"><div id="fill-sev2" class="progress-fill fill-mod" style="width: 0%;"></div></div>
+          </div>
+
+          <div class="sev-bar">
+            <div class="sev-header">
+              <span style="color: #d62828;">Сильная степень (High)</span>
+              <span id="res-sev3-val">0.0 га (0%)</span>
+            </div>
+            <div class="progress-track"><div id="fill-sev3" class="progress-fill fill-high" style="width: 0%;"></div></div>
+          </div>
+        </div>
+
+        <div style="font-size: 11px; color: #94a3b8; border-top: 1px solid #1e293b; padding-top: 8px;">
+          <div>Регион/Покрытие: <b id="res-region" style="color: #cbd5e1;">—</b></div>
+          <div>Зона UTM: <b id="res-utm" style="color: #cbd5e1;">EPSG:32638</b></div>
+          <div>Разрешение: <b style="color: #cbd5e1;">20 м/пикс (0.04 га)</b></div>
+        </div>
+
+        <div class="btn-export-group">
+          <a id="link-geojson" href="#" class="btn-export btn-geojson" download>📥 GeoJSON</a>
+          <a id="link-shp" href="#" class="btn-export btn-shp" download>📦 Shapefile</a>
+          <a id="link-report" href="#" class="btn-export btn-report" download>📄 Справка (JSON)</a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Map Canvas -->
+    <div id="map"></div>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+    // 1. Инициализация карты Leaflet
+    const map = L.map('map', {
+      center: [48.0, 44.0],
+      zoom: 8,
+      zoomControl: false
+    });
+    L.control.zoom({ position: 'topright' }).addTo(map);
+
+    // Темно-стильная подложка CartoDB Dark Matter / Positron
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; OpenStreetMap &copy; CARTO',
+      maxZoom: 19
+    }).addTo(map);
+
+    // Слои геометрий
+    let burnLayerGroup = L.featureGroup().addTo(map);
+    let thermalLayerGroup = L.featureGroup().addTo(map);
+    let aoiRectangle = null;
+
+    // Пресеты территорий и характерных дат космической съемки пожароопасного сезона
+    const REGION_DATA = {
+      volgograd: { bbox: [43.6, 47.7, 44.7, 48.5], from: "2024-04-15", to: "2024-05-15" },
+      kalmykia: { bbox: [44.0, 45.8, 45.5, 46.8], from: "2024-06-01", to: "2024-06-25" },
+      rostov: { bbox: [40.8, 47.1, 42.2, 47.9], from: "2024-07-20", to: "2024-08-15" },
+      astrakhan: { bbox: [46.8, 47.0, 48.0, 47.8], from: "2024-03-25", to: "2024-04-20" }
+    };
+
+    function updateAoiRect(bbox) {
+      if (aoiRectangle) map.removeLayer(aoiRectangle);
+      const bounds = [[bbox[1], bbox[0]], [bbox[3], bbox[2]]];
+      aoiRectangle = L.rectangle(bounds, {
+        color: '#3b82f6',
+        weight: 2,
+        fillColor: '#3b82f6',
+        fillOpacity: 0.05,
+        dashArray: '4, 6'
+      }).addTo(map);
+      map.fitBounds(bounds, { padding: [40, 40] });
+    }
+
+    // Обработчик смены региона
+    const regionSelect = document.getElementById('region-select');
+    const bboxInput = document.getElementById('bbox-input');
+
+    function parseBboxInput() {
+      const parts = bboxInput.value.split(',').map(x => parseFloat(x.trim()));
+      if (parts.length === 4 && !parts.some(isNaN)) {
+        return parts;
+      }
+      return null;
+    }
+
+    regionSelect.addEventListener('change', (e) => {
+      const val = e.target.value;
+      if (val === 'custom') {
+        document.getElementById('custom-bbox-fields').style.display = 'block';
+        const parsed = parseBboxInput();
+        if (parsed) updateAoiRect(parsed);
+      } else {
+        document.getElementById('custom-bbox-fields').style.display = 'none';
+        const reg = REGION_DATA[val];
+        updateAoiRect(reg.bbox);
+        document.getElementById('date-from').value = reg.from;
+        document.getElementById('date-to').value = reg.to;
+      }
+    });
+
+    bboxInput.addEventListener('input', () => {
+      if (regionSelect.value === 'custom') {
+        const parsed = parseBboxInput();
+        if (parsed) updateAoiRect(parsed);
+      }
+    });
+
+    updateAoiRect(REGION_DATA['volgograd'].bbox);
+    document.getElementById('date-from').value = REGION_DATA['volgograd'].from;
+    document.getElementById('date-to').value = REGION_DATA['volgograd'].to;
+
+    // Добавление легенды на карту
+    const legend = L.control({ position: 'bottomright' });
+    legend.onAdd = function() {
+      const div = L.DomUtil.create('div', 'legend-box');
+      div.innerHTML = `
+        <div style="font-weight: 700; margin-bottom: 6px;">Условные обозначения:</div>
+        <div class="legend-item"><div class="legend-circle"></div> <span>Термоточка VIIRS AF (375м)</span></div>
+        <div class="legend-item"><div class="legend-color" style="background: #ffd166;"></div> <span>Слабое поражение (1)</span></div>
+        <div class="legend-item"><div class="legend-color" style="background: #f77f00;"></div> <span>Среднее поражение (2)</span></div>
+        <div class="legend-item"><div class="legend-color" style="background: #d62828;"></div> <span>Сильное поражение (3)</span></div>
+      `;
+      return div;
+    };
+    legend.addTo(map);
+
+    // Стилизация полигонов гарей
+    function getSeverityStyle(feature) {
+      const cls = feature.properties.severity_class || 1;
+      let color = '#ffd166';
+      if (cls === 2) color = '#f77f00';
+      if (cls === 3) color = '#d62828';
+      return {
+        color: color,
+        weight: 1.5,
+        fillColor: color,
+        fillOpacity: 0.65
+      };
+    }
+
+    // Запуск анализа
+    const btnRun = document.getElementById('btn-run');
+    const statusBanner = document.getElementById('status-banner');
+    const reportCard = document.getElementById('report-card');
+
+    btnRun.addEventListener('click', async () => {
+      let bbox = null;
+      let chosenRegion = regionSelect.value;
+      if (chosenRegion === 'custom') {
+        const parts = document.getElementById('bbox-input').value.split(',').map(x => parseFloat(x.trim()));
+        if (parts.length === 4 && !parts.some(isNaN)) {
+          bbox = parts;
+        } else {
+          alert('Введите корректный BBox: min_lon, min_lat, max_lon, max_lat');
+          return;
+        }
+      } else {
+        bbox = REGION_DATA[chosenRegion].bbox;
+      }
+
+      btnRun.disabled = true;
+      statusBanner.style.display = 'block';
+      reportCard.style.display = 'none';
+      burnLayerGroup.clearLayers();
+      thermalLayerGroup.clearLayers();
+
+      const payload = {
+        bbox: bbox,
+        region: chosenRegion !== 'custom' ? chosenRegion : null,
+        date_from: document.getElementById('date-from').value,
+        date_to: document.getElementById('date-to').value,
+        include_radar: document.getElementById('chk-radar').checked
+      };
+
+      try {
+        // 1. POST /api/v1/analyze
+        const initResp = await fetch('/api/v1/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const initData = await initResp.json();
+        const taskId = initData.task_id;
+
+        // 2. Опрос статуса
+        let isDone = false;
+        let attempts = 0;
+        while (!isDone && attempts < 30) {
+          await new Promise(r => setTimeout(r, 600));
+          const stResp = await fetch(`/api/v1/tasks/${taskId}`);
+          const stData = await stResp.json();
+          if (stData.status === 'completed') {
+            isDone = true;
+          } else if (stData.status === 'failed') {
+            throw new Error('Обработка завершилась с ошибкой');
+          }
+          attempts++;
+        }
+
+        // 3. Получение отчета
+        const repResp = await fetch(`/api/v1/report/${taskId}`);
+        const rep = await repResp.json();
+
+        // 4. Загрузка GeoJSON контуров гарей
+        const geoResp = await fetch(`/api/v1/export/geojson/${taskId}`);
+        const geoData = await geoResp.json();
+
+        L.geoJSON(geoData, {
+          style: getSeverityStyle,
+          onEachFeature: function(feat, layer) {
+            const p = feat.properties;
+            layer.bindPopup(`
+              <div style="font-family: inherit; font-size: 13px;">
+                <b style="color: #ef4444;">Контур: ${p.contour_id}</b><br/>
+                <b>Степень:</b> ${p.severity_ru} (${p.severity_class})<br/>
+                <b>Площадь:</b> ${p.area_ha} га<br/>
+                <b>Проекция:</b> ${p.utm_zone}
+              </div>
+            `);
+          }
+        }).addTo(burnLayerGroup);
+
+        // 5. Загрузка GeoJSON термоточек AF
+        const thResp = await fetch(`/api/v1/export/thermal-points/${taskId}`);
+        if (thResp.ok) {
+          const thData = await thResp.json();
+          L.geoJSON(thData, {
+            pointToLayer: function(feat, latlng) {
+              return L.circleMarker(latlng, {
+                radius: 6,
+                fillColor: '#ef4444',
+                color: '#ffffff',
+                weight: 1.5,
+                opacity: 1,
+                fillOpacity: 0.9
+              });
+            },
+            onEachFeature: function(feat, layer) {
+              const p = feat.properties;
+              layer.bindPopup(`
+                <div style="font-family: inherit; font-size: 13px;">
+                  <b style="color: #f97316;">🔥 Термоточка: ${p.point_id}</b><br/>
+                  <b>Спутник:</b> ${p.satellite}<br/>
+                  <b>Яркостная темп. I4:</b> ${p.brightness_temp_i4_k} K<br/>
+                  <b>Контраст ΔT (I4-I5):</b> ${p.delta_t_k} K<br/>
+                  <b>Достоверность:</b> ${p.confidence}
+                </div>
+              `);
+            }
+          }).addTo(thermalLayerGroup);
+        }
+
+        // Автофокусировка карты на найденных контурах или территории анализа
+        if (burnLayerGroup.getLayers().length > 0) {
+          map.fitBounds(burnLayerGroup.getBounds(), { padding: [40, 40] });
+        } else if (aoiRectangle) {
+          map.fitBounds(aoiRectangle.getBounds(), { padding: [40, 40] });
+        }
+
+        // 6. Отображение отчета
+        const regNames = {
+          volgograd: 'Волгоградская обл.',
+          kalmykia: 'Респ. Калмыкия',
+          rostov: 'Ростовская обл.',
+          astrakhan: 'Астраханская обл.',
+          out_of_coverage: 'Вне зоны спутникового покрытия (0 га)'
+        };
+        document.getElementById('res-region').innerText = regNames[rep.region] || rep.region || 'Пользовательский BBox';
+        document.getElementById('res-total-area').innerText = rep.total_burned_area_ha.toFixed(1) + ' га';
+        document.getElementById('res-af-count').innerText = rep.active_thermal_anomalies_count;
+        document.getElementById('res-utm').innerText = rep.utm_zone;
+
+        const b1 = rep.breakdown.find(x => x.class_id === 1) || { area_ha: 0, percentage: 0 };
+        const b2 = rep.breakdown.find(x => x.class_id === 2) || { area_ha: 0, percentage: 0 };
+        const b3 = rep.breakdown.find(x => x.class_id === 3) || { area_ha: 0, percentage: 0 };
+
+        document.getElementById('res-sev1-val').innerText = `${b1.area_ha.toFixed(1)} га (${b1.percentage}%)`;
+        document.getElementById('fill-sev1').style.width = `${b1.percentage}%`;
+
+        document.getElementById('res-sev2-val').innerText = `${b2.area_ha.toFixed(1)} га (${b2.percentage}%)`;
+        document.getElementById('fill-sev2').style.width = `${b2.percentage}%`;
+
+        document.getElementById('res-sev3-val').innerText = `${b3.area_ha.toFixed(1)} га (${b3.percentage}%)`;
+        document.getElementById('fill-sev3').style.width = `${b3.percentage}%`;
+
+        document.getElementById('link-geojson').href = `/api/v1/export/geojson/${taskId}`;
+        document.getElementById('link-shp').href = `/api/v1/export/shapefile/${taskId}`;
+        document.getElementById('link-report').href = `/api/v1/export/report/${taskId}`;
+
+        statusBanner.style.display = 'none';
+        reportCard.style.display = 'block';
+
+      } catch (err) {
+        alert('Ошибка при анализе: ' + err.message);
+        statusBanner.style.display = 'none';
+      } finally {
+        btnRun.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

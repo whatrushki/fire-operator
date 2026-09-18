@@ -26,20 +26,28 @@ def export_shapefile_zip(features: list[dict], zip_out_path: str) -> str:
     """
     Конвертирует список Feature в ESRI Shapefile и упаковывает в ZIP архив
     со всеми необходимыми файлами (.shp, .shx, .dbf, .prj, .cpg).
+    Использует имена колонок <= 10 символов для полной совместимости со стандартом DBF.
     """
     if not features:
-        # Если пусто, создаем пустой zip
         with zipfile.ZipFile(zip_out_path, "w") as zf:
             zf.writestr("README.txt", "No burned area features detected for requested query.")
         return zip_out_path
 
-    # Преобразуем GeoJSON фичи в GeoDataFrame
+    # Преобразуем GeoJSON фичи в GeoDataFrame с лаконичными именами атрибутов DBF (<= 10 символов)
     records = []
     geometries = []
     for f in features:
         geom = shape(f["geometry"])
-        props = f["properties"].copy()
-        records.append(props)
+        props = f["properties"]
+        clean_props = {
+            "cnt_id": props.get("contour_id", ""),
+            "sev_class": int(props.get("severity_class", 1)),
+            "sev_ru": props.get("severity_ru", "")[:20],
+            "sev_en": props.get("severity_en", "")[:20],
+            "area_ha": float(props.get("area_ha", 0.0)),
+            "utm_zone": str(props.get("utm_zone", ""))[:12]
+        }
+        records.append(clean_props)
         geometries.append(geom)
 
     gdf = gpd.GeoDataFrame(records, geometry=geometries, crs="EPSG:4326")
