@@ -16,7 +16,7 @@ import joblib
 import rasterio
 import numpy as np
 import pandas as pd
-from scipy.ndimage import median_filter
+from scipy.ndimage import median_filter, label
 
 # Добавляем корень проекта в путь поиска модулей
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
@@ -38,6 +38,17 @@ def _init_worker():
     _WORKER_AF_MODEL, _WORKER_BS_MODEL = load_models()
 
 
+def _remove_small_components(binary_mask: np.ndarray, min_size: int = 25) -> np.ndarray:
+    """Удаление изолированного шума и мелких пятен размером меньше min_size пикселей."""
+    labeled, num_features = label(binary_mask)
+    if num_features == 0:
+        return binary_mask
+    counts = np.bincount(labeled.ravel())
+    mask_sizes = counts >= min_size
+    mask_sizes[0] = False
+    return mask_sizes[labeled]
+
+
 def _process_single_af(item):
     """Обработка одного чипа AF в пуле процессов."""
     chip_id, files = item
@@ -50,10 +61,10 @@ def _process_single_af(item):
         X = extract_af_features(viirs, aux)
         probs = _WORKER_AF_MODEL.predict_proba(X)[:, 1]
         
-        # Физическая фильтрация с учетом порога насыщения I4 (367 K)
+        # Физическая фильтрация с учетом калиброванного соревновательного порога
         i4 = X[:, 0]
         dt = X[:, 2]
-        pred_bin = ((probs > 0.65) & (i4 > 305.0) & (dt > 4.0)) | (i4 >= 366.5)
+        pred_bin = ((probs > 0.85) & (i4 > 305.0) & (dt > 4.0)) | (i4 >= 366.5)
         mask = pred_bin.astype(np.uint8).reshape((256, 256))
         return chip_id, 1, rle_encode(mask)
     except Exception as e:
@@ -74,10 +85,19 @@ def _process_single_bs(item):
         with rasterio.open(files["aux"]) as s: aux = s.read()
         
         X, cloud_mask = extract_bs_features(s2_pre, s2_post, s1_pre, s1_post, aux)
-        preds = _WORKER_BS_MODEL.predict(X)
-        pred_mask = preds.reshape((512, 512)).astype(np.uint8)
+        probs = _WORKER_BS_MODEL.predict_proba(X)
+        p_burn = 1.0 - probs[:, 0]
+        sev_class = np.argmax(probs[:, 1:4], axis=1) + 1
+        
+        # Калиброванный порог гари T=0.88 для устранения ложных ореолов на фоне
+        pred_mask = np.where(p_burn > 0.88, sev_class, 0).reshape((512, 512)).astype(np.uint8)
         pred_mask[~cloud_mask] = 0
         pred_mask = median_filter(pred_mask, size=3)
+        
+        # Морфологическая очистка мелких шумовых пикселей
+        burn_binary = pred_mask > 0
+        cleaned_binary = _remove_small_components(burn_binary, min_size=25)
+        pred_mask[~cleaned_binary] = 0
         
         res = []
         for cls_id in (1, 2, 3):

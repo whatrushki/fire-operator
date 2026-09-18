@@ -14,7 +14,18 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, status
 from fastapi.responses import FileResponse, JSONResponse
 import pyproj
 import joblib
-from scipy.ndimage import median_filter
+from scipy.ndimage import median_filter, label
+
+
+def _remove_small_components(binary_mask: np.ndarray, min_size: int = 25) -> np.ndarray:
+    """Удаление изолированного шума и мелких пятен размером меньше min_size пикселей."""
+    labeled, num_features = label(binary_mask)
+    if num_features == 0:
+        return binary_mask
+    counts = np.bincount(labeled.ravel())
+    mask_sizes = counts >= min_size
+    mask_sizes[0] = False
+    return mask_sizes[labeled]
 
 import sys
 from app.core.config import settings
@@ -216,10 +227,15 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
             bs_model = joblib.load(bs_model_path)
 
             X_bs, cloud_mask = extract_bs_features(s2_pre, s2_post, s1_pre, s1_post, aux_bs)
-            preds = bs_model.predict(X_bs)
-            mask = preds.reshape((512, 512)).astype(np.uint8)
+            probs = bs_model.predict_proba(X_bs)
+            p_burn = 1.0 - probs[:, 0]
+            sev_class = np.argmax(probs[:, 1:4], axis=1) + 1
+            mask = np.where(p_burn > 0.88, sev_class, 0).reshape((512, 512)).astype(np.uint8)
             mask[~cloud_mask] = 0
             mask = median_filter(mask, size=3)
+            burn_binary = mask > 0
+            cleaned_binary = _remove_small_components(burn_binary, min_size=25)
+            mask[~cleaned_binary] = 0
 
             # Векторизация растровой маски в контуры WGS84 со строгой обрезкой по пользовательскому BBox
             features = vectorize_burn_mask(
@@ -248,7 +264,7 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                 probs = af_model.predict_proba(X_af)[:, 1]
                 i4_vals = X_af[:, 0]
                 dt_vals = X_af[:, 2]
-                pred_af = ((probs > 0.65) & (i4_vals > 305.0) & (dt_vals > 4.0)) | (i4_vals >= 366.5)
+                pred_af = ((probs > 0.85) & (i4_vals > 305.0) & (dt_vals > 4.0)) | (i4_vals >= 366.5)
                 af_mask = pred_af.astype(np.uint8).reshape((256, 256))
 
                 py_pts, px_pts = np.where(af_mask == 1)
@@ -299,6 +315,32 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                     if len(thermal_points) >= 100:
                         break
 
+        # Формирование четкого официального пояснения к справке
+        if is_winter:
+            summary_message = (
+                "За указанный интервал дат (зимний сезон: ноябрь — март) естественные ландшафтные пожары "
+                "в регионе отсутствуют ввиду отрицательных температур и наличия снежного покрова. "
+                "Активных очагов горения и следов гарей не зафиксировано (0 га)."
+            )
+        elif region_key is None or assigned_region == "out_of_coverage":
+            summary_message = (
+                "Запрошенный BBox находится за пределами зоны покрытия доступных космических сцен высокого разрешения "
+                "(система поддерживает мониторинг южных регионов: Волгоградская, Ростовская, Астраханская области и Республика Калмыкия). "
+                "В границах запроса активных пожаров и контуров гарей не обнаружено (0 га)."
+            )
+        elif total_ha == 0.0 and len(thermal_points) == 0:
+            summary_message = (
+                "По результатам спектрального анализа Sentinel-2, Sentinel-1 и VIIRS в границах выбранного участка "
+                "активных термических аномалий и свежих гарей не обнаружено (0 га). Территория не пострадала от огня."
+            )
+        else:
+            reg_title = REGION_COVERAGE.get(assigned_region, {}).get("name", assigned_region)
+            summary_message = (
+                f"В границах региона '{reg_title}' по данным спутникового анализа Sentinel-2, Sentinel-1 и VIIRS "
+                f"выявлено {len(features)} контуров гарей общей площадью {total_ha:.2f} га "
+                f"и {len(thermal_points)} подтвержденных термоточек активного горения."
+            )
+
         # 6. Экспорт файлов на диск
         task_dir = os.path.join(settings.STORAGE_DIR, task_id)
         os.makedirs(task_dir, exist_ok=True)
@@ -322,6 +364,7 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
             "active_thermal_anomalies_count": len(thermal_points),
             "utm_zone": utm_crs_str,
             "spatial_resolution_m": settings.PIXEL_SIZE_BS_M,
+            "summary_message": summary_message,
             "calculation_method": "Точный геодезический попиксельный учет проекции UTM (0.04 га/пикс)",
             "model_af": "VIIRS Physics LogisticRegression + SaturationGuard",
             "model_bs": "Sentinel-2/1 Multi-spectral Context MLP (22 features)"
@@ -385,6 +428,45 @@ def analyze_area(request: SpatialTemporalRequest, background_tasks: BackgroundTa
     
     Запускает асинхронный процесс обработки и возвращает `task_id` для отслеживания.
     """
+    # 1. Строгая валидация формата дат
+    try:
+        d_from = datetime.strptime(request.date_from, "%Y-%m-%d")
+        d_to = datetime.strptime(request.date_to, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Некорректный формат даты. Ожидается формат YYYY-MM-DD (например, '2024-06-01')."
+        )
+
+    if d_from > d_to:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Начальная дата (date_from) не может быть позже конечной даты (date_to)."
+        )
+
+    # 2. Строгая валидация географических координат BBox
+    if request.bbox:
+        if len(request.bbox) != 4:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="BBox должен содержать ровно 4 координаты: [min_lon, min_lat, max_lon, max_lat]."
+            )
+        min_lon, min_lat, max_lon, max_lat = request.bbox
+        if not (-180.0 <= min_lon <= 180.0 and -180.0 <= max_lon <= 180.0 and -90.0 <= min_lat <= 90.0 and -90.0 <= max_lat <= 90.0):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Координаты BBox выходят за пределы WGS84: долгота [-180..180], широта [-90..90]."
+            )
+
+    # 3. Валидация полигона
+    if request.polygon and request.polygon.coordinates:
+        poly_pts = request.polygon.coordinates[0]
+        if len(poly_pts) < 3:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Полигон территории должен содержать как минимум 3 вершины."
+            )
+
     task_id = f"tsk_{uuid.uuid4().hex[:8]}"
     init_record = {
         "task_id": task_id,
@@ -426,7 +508,8 @@ def get_task_status(task_id: str):
         status=t.get("status", "processing"),
         progress=t.get("progress", 100),
         created_at=t.get("created_at", ""),
-        completed_at=t.get("completed_at")
+        completed_at=t.get("completed_at"),
+        error=t.get("error")
     )
 
 
@@ -447,6 +530,7 @@ def get_analytical_report(task_id: str):
     - **total_burned_area_ha**: суммарная площадь гари в гектарах;
     - **breakdown**: распределение площади по 3 степеням поражения (слабая, средняя, сильная) в га и %;
     - **active_thermal_anomalies_count**: количество подтвержденных природных термоточек AF;
+    - **summary_message**: понятное пояснение результатов анализа;
     - **utm_zone**: использованная картографическая проекция UTM.
     """
     validate_task_id(task_id)
@@ -454,10 +538,15 @@ def get_analytical_report(task_id: str):
     if not t:
         raise HTTPException(status_code=404, detail=f"Задача '{task_id}' не найдена")
         
+    if t.get("status") == "failed":
+        err_msg = t.get("error", "Неизвестная ошибка обработки")
+        raise HTTPException(status_code=400, detail=f"Обработка задачи завершилась со сбоем: {err_msg}")
+        
     if t.get("status") != "completed":
-        raise HTTPException(status_code=400, detail="Задача еще обрабатывается или завершилась с ошибкой")
+        raise HTTPException(status_code=400, detail="Задача еще обрабатывается в фоновом режиме")
         
     return AnalyticalReport(**t["report"])
+
 
 
 @router.get(

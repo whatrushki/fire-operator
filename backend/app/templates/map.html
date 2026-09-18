@@ -437,6 +437,8 @@
           </div>
         </div>
 
+        <div id="res-summary-box" style="margin: 10px 0; padding: 10px 12px; border-radius: 6px; font-size: 12px; line-height: 1.45; display: none;"></div>
+
         <div style="font-size: 11px; color: #94a3b8; border-top: 1px solid #1e293b; padding-top: 8px;">
           <div>Регион/Покрытие: <b id="res-region" style="color: #cbd5e1;">—</b></div>
           <div>Зона UTM: <b id="res-utm" style="color: #cbd5e1;">EPSG:32638</b></div>
@@ -608,6 +610,9 @@
           body: JSON.stringify(payload)
         });
         const initData = await initResp.json();
+        if (!initResp.ok) {
+          throw new Error(initData.detail || 'Ошибка параметров запроса');
+        }
         const taskId = initData.task_id;
 
         // 2. Опрос статуса
@@ -620,13 +625,17 @@
           if (stData.status === 'completed') {
             isDone = true;
           } else if (stData.status === 'failed') {
-            throw new Error('Обработка завершилась с ошибкой');
+            throw new Error(stData.error || 'Обработка завершилась со сбоем');
           }
           attempts++;
         }
 
         // 3. Получение отчета
         const repResp = await fetch(`/api/v1/report/${taskId}`);
+        if (!repResp.ok) {
+          const repErr = await repResp.json();
+          throw new Error(repErr.detail || 'Не удалось сформировать отчет');
+        }
         const rep = await repResp.json();
 
         // 4. Загрузка GeoJSON контуров гарей
@@ -678,12 +687,7 @@
           }).addTo(thermalLayerGroup);
         }
 
-        // Автофокусировка карты на найденных контурах или территории анализа
-        if (burnLayerGroup.getLayers().length > 0) {
-          map.fitBounds(burnLayerGroup.getBounds(), { padding: [40, 40] });
-        } else if (aoiRectangle) {
-          map.fitBounds(aoiRectangle.getBounds(), { padding: [40, 40] });
-        }
+        // Положение и масштаб карты сохраняются на месте без телепортации и резких скачков
 
         // 6. Отображение отчета
         const regNames = {
@@ -697,6 +701,25 @@
         document.getElementById('res-total-area').innerText = rep.total_burned_area_ha.toFixed(1) + ' га';
         document.getElementById('res-af-count').innerText = rep.active_thermal_anomalies_count;
         document.getElementById('res-utm').innerText = rep.utm_zone;
+
+        // Блок официального пояснения
+        const summaryBox = document.getElementById('res-summary-box');
+        if (rep.summary_message) {
+          summaryBox.style.display = 'block';
+          if (rep.total_burned_area_ha > 0) {
+            summaryBox.style.background = 'rgba(239, 68, 68, 0.15)';
+            summaryBox.style.border = '1px solid rgba(239, 68, 68, 0.4)';
+            summaryBox.style.color = '#fca5a5';
+            summaryBox.innerHTML = `<b>🔥 Очаги обнаружены:</b> ${rep.summary_message}`;
+          } else {
+            summaryBox.style.background = 'rgba(34, 197, 94, 0.15)';
+            summaryBox.style.border = '1px solid rgba(34, 197, 94, 0.4)';
+            summaryBox.style.color = '#86efac';
+            summaryBox.innerHTML = `<b>✅ Заключение:</b> ${rep.summary_message}`;
+          }
+        } else {
+          summaryBox.style.display = 'none';
+        }
 
         const b1 = rep.breakdown.find(x => x.class_id === 1) || { area_ha: 0, percentage: 0 };
         const b2 = rep.breakdown.find(x => x.class_id === 2) || { area_ha: 0, percentage: 0 };
@@ -719,7 +742,7 @@
         reportCard.style.display = 'block';
 
       } catch (err) {
-        alert('Ошибка при анализе: ' + err.message);
+        alert('Внимание: ' + err.message);
         statusBanner.style.display = 'none';
       } finally {
         btnRun.disabled = false;

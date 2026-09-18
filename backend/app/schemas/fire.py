@@ -97,6 +97,7 @@ class TaskStatusResponse(BaseModel):
     progress: int = Field(..., description="Процент завершения (0..100)")
     created_at: str = Field(..., description="Время создания задачи (ISO 8601)")
     completed_at: Optional[str] = Field(None, description="Время завершения обработки")
+    error: Optional[str] = Field(None, description="Описание ошибки при сбое выполнения задачи")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -105,7 +106,8 @@ class TaskStatusResponse(BaseModel):
                 "status": "completed",
                 "progress": 100,
                 "created_at": "2026-09-18T14:30:00Z",
-                "completed_at": "2026-09-18T14:30:03Z"
+                "completed_at": "2026-09-18T14:30:03Z",
+                "error": None
             }
         }
     )
@@ -140,6 +142,10 @@ class AnalyticalReport(BaseModel):
     utm_zone: str = Field(..., description="Проекция UTM, в которой выполнялся расчет площади")
     spatial_resolution_m: float = Field(default=20.0, description="Пространственное разрешение исходных данных (м/пикс)")
     region: Optional[str] = Field(None, description="Регион мониторинга")
+    summary_message: Optional[str] = Field(
+        None,
+        description="Официальное текстовое заключение по результатам космического анализа"
+    )
     calculation_method: str = Field(
         default="Точный геодезический попиксельный учет проекции UTM (0.04 га/пикс)",
         description="Методика расчета площадей"
