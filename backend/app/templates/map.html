@@ -194,6 +194,44 @@
       opacity: 0.6;
       cursor: not-allowed;
     }
+    /* Manual drawing button & hints */
+    .btn-draw {
+      width: 100%;
+      margin-top: 8px;
+      background: #1e293b;
+      color: #38bdf8;
+      border: 1px solid #0284c7;
+      padding: 9px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.2s ease;
+    }
+    .btn-draw:hover {
+      background: rgba(2, 132, 199, 0.2);
+      border-color: #38bdf8;
+    }
+    .btn-draw.active {
+      background: #0284c7;
+      color: #ffffff;
+      border-color: #38bdf8;
+      box-shadow: 0 0 12px rgba(2, 132, 199, 0.5);
+    }
+    .draw-hint {
+      margin-top: 6px;
+      padding: 8px 10px;
+      background: rgba(14, 165, 233, 0.15);
+      border: 1px solid rgba(14, 165, 233, 0.35);
+      border-radius: 6px;
+      font-size: 12px;
+      color: #7dd3fc;
+      line-height: 1.4;
+    }
     /* Report card */
     #report-card {
       display: none;
@@ -324,8 +362,22 @@
       border-top-color: #fff;
       animation: spin 0.8s linear infinite;
     }
-    @keyframes spin {
-      to { transform: rotate(360deg); }
+    .leaflet-control-layers {
+      background: rgba(15, 23, 42, 0.95) !important;
+      border: 1px solid #334155 !important;
+      color: #f1f5f9 !important;
+      border-radius: 8px !important;
+      padding: 8px 12px !important;
+      font-family: inherit !important;
+      font-size: 12px !important;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4) !important;
+    }
+    .leaflet-control-layers-separator {
+      border-top-color: #334155 !important;
+    }
+    .leaflet-control-layers label {
+      cursor: pointer;
+      margin-bottom: 3px;
     }
   </style>
 </head>
@@ -351,13 +403,24 @@
       <div class="panel-section">
         <div class="section-title">📍 Территория мониторинга (AOI)</div>
         <div class="form-group">
-          <label for="region-select">Предустановленные регионы Юга России:</label>
+          <label for="region-select">Космический мониторинг / Инциденты:</label>
           <select id="region-select">
-            <option value="volgograd">Волгоградская область (Цимлянское вдхр.)</option>
-            <option value="kalmykia">Республика Калмыкия (Степные массивы)</option>
-            <option value="rostov">Ростовская область (Пойма Нижнего Дона)</option>
-            <option value="astrakhan">Астраханская область (Волго-Ахтубинская пойма)</option>
-            <option value="custom">Пользовательский BBox (WGS84)</option>
+            <optgroup label="🔥 Реальные инциденты из базы Sentinel-2/1:">
+              <option value="volgograd_huge_2022" selected>Волгоград — Заволжье (авг 2022, 3350 га)</option>
+              <option value="astrakhan_max_2022">Астрахань — Каспий (июль 2022, 5878 га)</option>
+              <option value="rostov_salsk_2019">Ростовская обл. — Сальск (авг 2019, 4291 га)</option>
+              <option value="volgograd_north_2020">Волгоград — Север (июль 2020, 3596 га)</option>
+              <option value="kalmykia_border_2024">Калмыкия — Юг (июль 2024, 3813 га)</option>
+            </optgroup>
+            <optgroup label="📍 Обзорные регионы Юга России:">
+              <option value="volgograd">Волгоградская область (Цимлянское вдхр.)</option>
+              <option value="kalmykia">Республика Калмыкия (Степные массивы)</option>
+              <option value="rostov">Ростовская область (Пойма Нижнего Дона)</option>
+              <option value="astrakhan">Астраханская область (Волго-Ахтубинская пойма)</option>
+            </optgroup>
+            <optgroup label="✏️ Произвольный выбор:">
+              <option value="custom">Пользовательский BBox / Разметка на карте</option>
+            </optgroup>
           </select>
         </div>
         <div id="custom-bbox-fields" style="display: none;">
@@ -365,6 +428,13 @@
             <label>BBox [min_lon, min_lat, max_lon, max_lat]:</label>
             <input type="text" id="bbox-input" value="43.0, 47.0, 45.5, 48.5" />
           </div>
+        </div>
+
+        <button id="btn-draw-mode" type="button" class="btn-draw">
+          <span id="draw-btn-icon">✏️</span> <span id="draw-btn-text">Разметить границы на карте</span>
+        </button>
+        <div id="draw-hint" class="draw-hint" style="display: none;">
+          <span>👉 Кликните на карте <b>1-й угол</b>, затем <b>2-й противоположный угол</b> рамки.</span>
         </div>
       </div>
 
@@ -469,26 +539,51 @@
     });
     L.control.zoom({ position: 'topright' }).addTo(map);
 
-    // Темно-стильная подложка CartoDB Dark Matter / Positron
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; OpenStreetMap &copy; CARTO',
+    // Базовые подложки без водяных знаков и ограничений
+    const osmLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>',
       maxZoom: 19
-    }).addTo(map);
+    });
+
+    const esriSatLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      attribution: 'Tiles &copy; Esri &mdash; DigitalGlobe, GeoEye, Earthstar',
+      maxZoom: 18
+    });
+
+    // По умолчанию включаем чистую подложку OSM
+    osmLayer.addTo(map);
 
     // Слои геометрий
     let burnLayerGroup = L.featureGroup().addTo(map);
     let thermalLayerGroup = L.featureGroup().addTo(map);
     let aoiRectangle = null;
 
+    // Переключатель слоев карты и контуров
+    L.control.layers({
+      "Схема (OpenStreetMap)": osmLayer,
+      "Космоснимок (Esri Satellite)": esriSatLayer
+    }, {
+      "Контуры гарей": burnLayerGroup,
+      "Термоточки (AF)": thermalLayerGroup
+    }, { position: 'topright', collapsed: true }).addTo(map);
+
     // Пресеты территорий и характерных дат космической съемки пожароопасного сезона
     const REGION_DATA = {
+      // Крупные реальные пожары из базы Sentinel-2/1:
+      volgograd_huge_2022: { bbox: [46.12, 49.50, 46.34, 49.68], from: "2022-08-10", to: "2022-08-28" },
+      astrakhan_max_2022: { bbox: [47.05, 48.00, 47.26, 48.20], from: "2022-06-20", to: "2022-07-10" },
+      rostov_salsk_2019: { bbox: [41.36, 45.98, 41.58, 46.16], from: "2019-08-15", to: "2019-09-01" },
+      volgograd_north_2020: { bbox: [42.84, 49.86, 43.06, 50.04], from: "2020-07-01", to: "2020-07-15" },
+      kalmykia_border_2024: { bbox: [41.91, 46.33, 42.14, 46.52], from: "2024-07-05", to: "2024-07-22" },
+
+      // Базовые регионы Юга России:
       volgograd: { bbox: [43.6, 47.7, 44.7, 48.5], from: "2024-04-15", to: "2024-05-15" },
       kalmykia: { bbox: [44.0, 45.8, 45.5, 46.8], from: "2024-06-01", to: "2024-06-25" },
       rostov: { bbox: [40.8, 47.1, 42.2, 47.9], from: "2024-07-20", to: "2024-08-15" },
       astrakhan: { bbox: [46.8, 47.0, 48.0, 47.8], from: "2024-03-25", to: "2024-04-20" }
     };
 
-    function updateAoiRect(bbox) {
+    function updateAoiRect(bbox, shouldFit = true) {
       if (aoiRectangle) map.removeLayer(aoiRectangle);
       const bounds = [[bbox[1], bbox[0]], [bbox[3], bbox[2]]];
       aoiRectangle = L.rectangle(bounds, {
@@ -498,7 +593,9 @@
         fillOpacity: 0.05,
         dashArray: '4, 6'
       }).addTo(map);
-      map.fitBounds(bounds, { padding: [40, 40] });
+      if (shouldFit) {
+        map.fitBounds(bounds, { padding: [40, 40] });
+      }
     }
 
     // Обработчик смены региона
@@ -518,11 +615,11 @@
       if (val === 'custom') {
         document.getElementById('custom-bbox-fields').style.display = 'block';
         const parsed = parseBboxInput();
-        if (parsed) updateAoiRect(parsed);
+        if (parsed) updateAoiRect(parsed, false);
       } else {
         document.getElementById('custom-bbox-fields').style.display = 'none';
         const reg = REGION_DATA[val];
-        updateAoiRect(reg.bbox);
+        updateAoiRect(reg.bbox, true);
         document.getElementById('date-from').value = reg.from;
         document.getElementById('date-to').value = reg.to;
       }
@@ -531,13 +628,111 @@
     bboxInput.addEventListener('input', () => {
       if (regionSelect.value === 'custom') {
         const parsed = parseBboxInput();
-        if (parsed) updateAoiRect(parsed);
+        if (parsed) updateAoiRect(parsed, false);
       }
     });
 
-    updateAoiRect(REGION_DATA['volgograd'].bbox);
-    document.getElementById('date-from').value = REGION_DATA['volgograd'].from;
-    document.getElementById('date-to').value = REGION_DATA['volgograd'].to;
+    // -------------------------------------------------------------
+    // Интерактивная ручная разметка границ прямо кликами по карте
+    // -------------------------------------------------------------
+    let isDrawing = false;
+    let drawStartLatLng = null;
+    let drawPreviewLayer = null;
+
+    const btnDraw = document.getElementById('btn-draw-mode');
+    const drawHint = document.getElementById('draw-hint');
+
+    function toggleDrawingMode(forcedState) {
+      isDrawing = (typeof forcedState === 'boolean') ? forcedState : !isDrawing;
+      if (isDrawing) {
+        btnDraw.classList.add('active');
+        document.getElementById('draw-btn-text').innerText = 'Отменить разметку';
+        document.getElementById('draw-btn-icon').innerText = '❌';
+        drawHint.style.display = 'block';
+        drawHint.innerHTML = '<span>👉 Кликните на карте <b>1-й угол</b>, затем <b>2-й угол</b> противоположного края.</span>';
+        map.getContainer().style.cursor = 'crosshair';
+        drawStartLatLng = null;
+        if (drawPreviewLayer) {
+          map.removeLayer(drawPreviewLayer);
+          drawPreviewLayer = null;
+        }
+      } else {
+        btnDraw.classList.remove('active');
+        document.getElementById('draw-btn-text').innerText = 'Разметить границы на карте';
+        document.getElementById('draw-btn-icon').innerText = '✏️';
+        drawHint.style.display = 'none';
+        map.getContainer().style.cursor = '';
+        if (drawPreviewLayer) {
+          map.removeLayer(drawPreviewLayer);
+          drawPreviewLayer = null;
+        }
+        drawStartLatLng = null;
+      }
+    }
+
+    btnDraw.addEventListener('click', () => toggleDrawingMode());
+
+    // Отмена по клавише Escape
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && isDrawing) {
+        toggleDrawingMode(false);
+      }
+    });
+
+    map.on('click', (e) => {
+      if (!isDrawing) return;
+
+      if (!drawStartLatLng) {
+        // Первый клик: устанавливаем 1-й угол
+        drawStartLatLng = e.latlng;
+        drawHint.innerHTML = '<span>👉 Точка 1 установлена! Теперь кликните <b>противоположный угол</b>.</span>';
+        const bounds = L.latLngBounds(drawStartLatLng, drawStartLatLng);
+        drawPreviewLayer = L.rectangle(bounds, {
+          color: '#38bdf8',
+          weight: 2,
+          dashArray: '4, 4',
+          fillColor: '#38bdf8',
+          fillOpacity: 0.18
+        }).addTo(map);
+      } else {
+        // Второй клик: фиксируем 2-й угол и завершаем разметку
+        const endLatLng = e.latlng;
+        const minLon = Math.min(drawStartLatLng.lng, endLatLng.lng);
+        const maxLon = Math.max(drawStartLatLng.lng, endLatLng.lng);
+        const minLat = Math.min(drawStartLatLng.lat, endLatLng.lat);
+        const maxLat = Math.max(drawStartLatLng.lat, endLatLng.lat);
+
+        const bbox = [
+          Number(minLon.toFixed(4)),
+          Number(minLat.toFixed(4)),
+          Number(maxLon.toFixed(4)),
+          Number(maxLat.toFixed(4))
+        ];
+
+        // Переключаем форму на custom BBox
+        regionSelect.value = 'custom';
+        document.getElementById('custom-bbox-fields').style.display = 'block';
+        bboxInput.value = bbox.join(', ');
+
+        // Отрисовываем постоянную синюю рамку на месте (без смещения экрана)
+        updateAoiRect(bbox, false);
+
+        // Выходим из режима рисования
+        toggleDrawingMode(false);
+      }
+    });
+
+    map.on('mousemove', (e) => {
+      if (isDrawing && drawStartLatLng && drawPreviewLayer) {
+        const bounds = L.latLngBounds(drawStartLatLng, e.latlng);
+        drawPreviewLayer.setBounds(bounds);
+      }
+    });
+
+    const initPreset = 'volgograd_huge_2022';
+    updateAoiRect(REGION_DATA[initPreset].bbox);
+    document.getElementById('date-from').value = REGION_DATA[initPreset].from;
+    document.getElementById('date-to').value = REGION_DATA[initPreset].to;
 
     // Добавление легенды на карту
     const legend = L.control({ position: 'bottomright' });
@@ -691,6 +886,11 @@
 
         // 6. Отображение отчета
         const regNames = {
+          volgograd_huge_2022: 'Волгоград (Заволжье)',
+          astrakhan_max_2022: 'Астрахань (Прикаспий)',
+          rostov_salsk_2019: 'Ростовская обл. (Сальск)',
+          volgograd_north_2020: 'Волгоград (Север)',
+          kalmykia_border_2024: 'Калмыкия (Южный рубеж)',
           volgograd: 'Волгоградская обл.',
           kalmykia: 'Респ. Калмыкия',
           rostov: 'Ростовская обл.',
