@@ -304,12 +304,20 @@ def validate_strictly_unseen(af_model, bs_model, val_af: list[str], val_bs: list
         with rasterio.open(aux_p) as s: aux = s.read()
         with rasterio.open(mask_p) as s: gt_mask = s.read(1)
         
+        # Строгая попиксельная синхронизация с inference.py
         X, cloud_mask = extract_bs_features(s2_pre, s2_post, s1_pre, s1_post, aux)
-        preds = bs_model.predict(X)
-        pred_mask = preds.reshape((512, 512)).astype(np.uint8)
+        probs = bs_model.predict_proba(X)
+        p_burn = 1.0 - probs[:, 0]
+        sev_class = np.argmax(probs[:, 1:4], axis=1) + 1
+        
+        pred_mask = np.where(p_burn > 0.88, sev_class, 0).reshape((512, 512)).astype(np.uint8)
         pred_mask[~cloud_mask] = 0
-        pred_mask_smooth = median_filter(pred_mask, size=3)
-        acc.update_bs(pred_mask_smooth, gt_mask)
+        pred_mask = median_filter(pred_mask, size=3)
+        
+        burn_binary = pred_mask > 0
+        cleaned_binary = _remove_small(burn_binary, min_size=25)
+        pred_mask[~cleaned_binary] = 0
+        acc.update_bs(pred_mask, gt_mask)
         
     print(f"Валидация BS завершена за {time.time()-t_val_bs:.1f} с")
 

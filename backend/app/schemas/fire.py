@@ -58,6 +58,10 @@ class SpatialTemporalRequest(BaseModel):
         default=None,
         description="Кодовое наименование региона (volgograd, kalmykia, rostov, astrakhan или custom)."
     )
+    data_source: Optional[str] = Field(
+        default=None,
+        description="Источник данных: 'offline' (архив чипов), 'online' (NASA FIRMS + Copernicus CDSE), 'hybrid' (онлайн с fallback). При None берётся из конфига сервера."
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -97,6 +101,7 @@ class TaskStatusResponse(BaseModel):
     progress: int = Field(..., description="Процент завершения (0..100)")
     created_at: str = Field(..., description="Время создания задачи (ISO 8601)")
     completed_at: Optional[str] = Field(None, description="Время завершения обработки")
+    error: Optional[str] = Field(None, description="Описание ошибки при сбое выполнения задачи")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -105,7 +110,8 @@ class TaskStatusResponse(BaseModel):
                 "status": "completed",
                 "progress": 100,
                 "created_at": "2026-09-18T14:30:00Z",
-                "completed_at": "2026-09-18T14:30:03Z"
+                "completed_at": "2026-09-18T14:30:03Z",
+                "error": None
             }
         }
     )

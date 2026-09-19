@@ -25,9 +25,23 @@ class Settings(BaseSettings):
     PIXEL_SIZE_AF_M: float = 375.0
     PIXEL_AREA_AF_HA: float = 14.0625  # (375m * 375m) = 140625 m2 = 14.0625 ha
 
-    model_config = ConfigDict(case_sensitive=True)
+    # Спутниковые API (онлайн-режим)
+    # Режим источника данных: "offline" (архив чипов), "online" (NASA FIRMS + Copernicus CDSE), "hybrid" (онлайн с fallback на офлайн)
+    DATA_SOURCE_MODE: str = "offline"
+    # NASA FIRMS MAP_KEY (бесплатно: https://firms.modaps.eosdis.nasa.gov/api/area/)
+    FIRMS_API_KEY: str = ""
+    # Copernicus Data Space Ecosystem OAuth2 (бесплатно: https://dataspace.copernicus.eu/)
+    CDSE_CLIENT_ID: str = ""
+    CDSE_CLIENT_SECRET: str = ""
+    # Кэш загруженных спутниковых сцен
+    SATELLITE_CACHE_DIR: str = os.path.join(BASE_DIR, "storage", "satellite_cache")
+    SATELLITE_CACHE_TTL_HOURS: int = 24
+    SATELLITE_CACHE_MAX_GB: float = 2.0
+
+    model_config = ConfigDict(case_sensitive=True, env_file=".env", env_file_encoding="utf-8")
 
 
 settings = Settings()
 os.makedirs(settings.STORAGE_DIR, exist_ok=True)
 os.makedirs(settings.TEMPLATES_DIR, exist_ok=True)
+os.makedirs(settings.SATELLITE_CACHE_DIR, exist_ok=True)

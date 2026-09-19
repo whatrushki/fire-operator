@@ -14,7 +14,18 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, status
 from fastapi.responses import FileResponse, JSONResponse
 import pyproj
 import joblib
-from scipy.ndimage import median_filter
+from scipy.ndimage import median_filter, label
+
+
+def _remove_small_components(binary_mask: np.ndarray, min_size: int = 25) -> np.ndarray:
+    """Удаление изолированного шума и мелких пятен размером меньше min_size пикселей."""
+    labeled, num_features = label(binary_mask)
+    if num_features == 0:
+        return binary_mask
+    counts = np.bincount(labeled.ravel())
+    mask_sizes = counts >= min_size
+    mask_sizes[0] = False
+    return mask_sizes[labeled]
 
 import sys
 from app.core.config import settings
@@ -24,6 +35,8 @@ if settings.PROJECT_ROOT not in sys.path:
 
 from ml.features_af import extract_af_features
 from ml.features_bs import extract_bs_features
+from app.services.chip_catalog import catalog
+from app.services.satellite import get_satellite_provider
 from app.schemas.fire import (
     SpatialTemporalRequest,
     TaskInitResponse,
@@ -52,6 +65,26 @@ router = APIRouter()
 
 # Кэш в памяти процесса (с обязательной персистентной синхронизацией на диск)
 TASKS_DB: dict[str, dict] = {}
+
+# Глобальный кэш инстансов ML моделей в оперативной памяти (исключает повторный joblib.load на каждый запрос)
+_CACHED_MODELS: dict[str, Any] = {}
+
+def get_bs_model():
+    if "bs" not in _CACHED_MODELS:
+        bs_model_path = os.path.join(settings.WEIGHTS_DIR, "bs_model.joblib")
+        if not os.path.exists(bs_model_path):
+            raise FileNotFoundError(f"Модель BS не найдена: {bs_model_path}")
+        _CACHED_MODELS["bs"] = joblib.load(bs_model_path)
+    return _CACHED_MODELS["bs"]
+
+def get_af_model():
+    if "af" not in _CACHED_MODELS:
+        af_model_path = os.path.join(settings.WEIGHTS_DIR, "af_model.joblib")
+        if os.path.exists(af_model_path):
+            _CACHED_MODELS["af"] = joblib.load(af_model_path)
+        else:
+            return None
+    return _CACHED_MODELS["af"]
 
 
 def validate_task_id(task_id: str):
@@ -306,6 +339,7 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
             "active_thermal_anomalies_count": len(thermal_points),
             "utm_zone": utm_crs_str,
             "spatial_resolution_m": settings.PIXEL_SIZE_BS_M,
+            "summary_message": summary_message,
             "calculation_method": "Точный геодезический попиксельный учет проекции UTM (0.04 га/пикс)",
             "model_af": model_af,
             "model_bs": model_bs,
@@ -378,6 +412,45 @@ def analyze_area(request: SpatialTemporalRequest, background_tasks: BackgroundTa
     
     Запускает асинхронный процесс обработки и возвращает `task_id` для отслеживания.
     """
+    # 1. Строгая валидация формата дат
+    try:
+        d_from = datetime.strptime(request.date_from, "%Y-%m-%d")
+        d_to = datetime.strptime(request.date_to, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Некорректный формат даты. Ожидается формат YYYY-MM-DD (например, '2024-06-01')."
+        )
+
+    if d_from > d_to:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Начальная дата (date_from) не может быть позже конечной даты (date_to)."
+        )
+
+    # 2. Строгая валидация географических координат BBox
+    if request.bbox:
+        if len(request.bbox) != 4:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="BBox должен содержать ровно 4 координаты: [min_lon, min_lat, max_lon, max_lat]."
+            )
+        min_lon, min_lat, max_lon, max_lat = request.bbox
+        if not (-180.0 <= min_lon <= 180.0 and -180.0 <= max_lon <= 180.0 and -90.0 <= min_lat <= 90.0 and -90.0 <= max_lat <= 90.0):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Координаты BBox выходят за пределы WGS84: долгота [-180..180], широта [-90..90]."
+            )
+
+    # 3. Валидация полигона
+    if request.polygon and request.polygon.coordinates:
+        poly_pts = request.polygon.coordinates[0]
+        if len(poly_pts) < 3:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Полигон территории должен содержать как минимум 3 вершины."
+            )
+
     task_id = f"tsk_{uuid.uuid4().hex[:8]}"
     init_record = {
         "task_id": task_id,
@@ -430,7 +503,8 @@ def get_task_status(task_id: str):
         status=t.get("status", "processing"),
         progress=t.get("progress", 100),
         created_at=t.get("created_at", ""),
-        completed_at=t.get("completed_at")
+        completed_at=t.get("completed_at"),
+        error=t.get("error")
     )
 
 
@@ -451,6 +525,7 @@ def get_analytical_report(task_id: str):
     - **total_burned_area_ha**: суммарная площадь гари в гектарах;
     - **breakdown**: распределение площади по 3 степеням поражения (слабая, средняя, сильная) в га и %;
     - **active_thermal_anomalies_count**: количество подтвержденных природных термоточек AF;
+    - **summary_message**: понятное пояснение результатов анализа;
     - **utm_zone**: использованная картографическая проекция UTM.
     """
     validate_task_id(task_id)
@@ -458,10 +533,15 @@ def get_analytical_report(task_id: str):
     if not t:
         raise HTTPException(status_code=404, detail=f"Задача '{task_id}' не найдена")
         
+    if t.get("status") == "failed":
+        err_msg = t.get("error", "Неизвестная ошибка обработки")
+        raise HTTPException(status_code=400, detail=f"Обработка задачи завершилась со сбоем: {err_msg}")
+        
     if t.get("status") != "completed":
-        raise HTTPException(status_code=400, detail="Задача еще обрабатывается или завершилась с ошибкой")
+        raise HTTPException(status_code=400, detail="Задача еще обрабатывается в фоновом режиме")
         
     return AnalyticalReport(**t["report"])
+
 
 
 @router.get(
@@ -647,3 +727,25 @@ def health_check():
         },
         storage_accessible=os.path.exists(settings.STORAGE_DIR)
     )
+
+
+@router.get(
+    "/presets",
+    summary="Список характерных исторических пожаров для быстрого выбора",
+    tags=["Геоинформационный анализ (Spatial Analytics)"]
+)
+def get_presets():
+    """Возвращает список подтвержденных исторических пожаров из базы космического мониторинга."""
+    return JSONResponse(content={"presets": catalog.get_featured_presets()})
+
+
+@router.get(
+    "/satellites/status",
+    summary="Диагностический статус подключения к онлайн-спутникам",
+    tags=["Спутниковый мониторинг (Online Satellites)"]
+)
+def get_satellites_status():
+    """Возвращает готовность провайдеров NASA FIRMS и Copernicus CDSE, а также состояние кэша."""
+    provider = get_satellite_provider()
+    return JSONResponse(content=provider.get_service_status())
+

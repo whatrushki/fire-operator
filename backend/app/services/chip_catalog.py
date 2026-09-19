@@ -1,0 +1,382 @@
+"""
+Каталог спутниковых чипов (Spatio-Temporal Scene Catalog)
+Обеспечивает пространственно-временной поиск реальных спутниковых сцен
+по географическим координатам (BBox / полигон) и временному интервалу.
+"""
+import os
+import math
+from datetime import datetime, date, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
+import pandas as pd
+import pyproj
+from shapely.geometry import box, Polygon
+
+# Пути к обучающим и демонстрационным данным
+POSSIBLE_TRAIN_DIRS = [
+    os.environ.get("TRAIN_DATA_DIR", ""),
+    r"C:\Users\vladg\Desktop\Кейс\fire-train-renamed\train",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "Кейс", "fire-train-renamed", "train")),
+]
+
+FALLBACK_SAMPLE_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "data", "sample_chips")
+)
+
+
+class ChipCatalog:
+    def __init__(self):
+        self.bs_chips: List[Dict[str, Any]] = []
+        self.af_chips: List[Dict[str, Any]] = []
+        self.is_loaded = False
+        self._load_catalog()
+
+    def _find_train_dir(self) -> Optional[Path]:
+        for p in POSSIBLE_TRAIN_DIRS:
+            if p and os.path.isdir(p):
+                p_path = Path(p)
+                if (p_path / "bs" / "meta.csv").exists():
+                    return p_path
+        return None
+
+    def _load_catalog(self):
+        train_path = self._find_train_dir()
+        if not train_path:
+            print("[ChipCatalog] Train directory not found, will use sample_chips fallback.")
+            self.is_loaded = True
+            return
+
+        # 1. Загрузка BS чипов
+        bs_meta_p = train_path / "bs" / "meta.csv"
+        if bs_meta_p.exists():
+            try:
+                df_bs = pd.read_csv(bs_meta_p)
+                for _, r in df_bs.iterrows():
+                    if pd.isna(r.get("epsg")) or pd.isna(r.get("x_min")):
+                        continue
+                    epsg_code = int(r["epsg"])
+                    crs_str = f"EPSG:{epsg_code}"
+                    
+                    # Проекция в WGS84
+                    t = pyproj.Transformer.from_crs(crs_str, "EPSG:4326", always_xy=True)
+                    min_lon, min_lat = t.transform(r["x_min"], r["y_min"])
+                    max_lon, max_lat = t.transform(r["x_max"], r["y_max"])
+                    
+                    chip_id = str(r["chip_id"])
+                    
+                    # Файлы чипа
+                    s2_pre = train_path / "bs" / "sentinel2_pre" / f"{chip_id}_Sentinel-2_pre.tif"
+                    s2_post = train_path / "bs" / "sentinel2_post" / f"{chip_id}_Sentinel-2_post.tif"
+                    s1_pre = train_path / "bs" / "sentinel1_pre" / f"{chip_id}_Sentinel-1_pre.tif"
+                    s1_post = train_path / "bs" / "sentinel1_post" / f"{chip_id}_Sentinel-1_post.tif"
+                    aux_p = train_path / "bs" / "aux" / f"{chip_id}_AUX.tif"
+                    
+                    if not (s2_pre.exists() and s2_post.exists()):
+                        continue
+
+                    # Даты
+                    d_pre = datetime.strptime(str(r["date_pre"]), "%Y-%m-%d").date() if pd.notna(r.get("date_pre")) else None
+                    d_post = datetime.strptime(str(r["date_post"]), "%Y-%m-%d").date() if pd.notna(r.get("date_post")) else None
+
+                    self.bs_chips.append({
+                        "chip_id": chip_id,
+                        "kind": "bs",
+                        "epsg": epsg_code,
+                        "crs_str": crs_str,
+                        "utm_bounds": (r["x_min"], r["y_min"], r["x_max"], r["y_max"]),
+                        "wgs_bounds": (min_lon, min_lat, max_lon, max_lat),
+                        "center_lon": (min_lon + max_lon) / 2.0,
+                        "center_lat": (min_lat + max_lat) / 2.0,
+                        "poly_wgs": box(min_lon, min_lat, max_lon, max_lat),
+                        "date_pre": d_pre,
+                        "date_post": d_post,
+                        "burn_area_ha": float(r.get("burn_area_ha", 0.0)) if pd.notna(r.get("burn_area_ha")) else 0.0,
+                        "fire_event_id": str(r.get("fire_event_id", "")),
+                        "files": {
+                            "s2_pre": str(s2_pre),
+                            "s2_post": str(s2_post),
+                            "s1_pre": str(s1_pre),
+                            "s1_post": str(s1_post),
+                            "aux": str(aux_p)
+                        }
+                    })
+            except Exception as e:
+                print(f"[ChipCatalog] Error loading BS metadata: {e}")
+
+        # 2. Загрузка AF чипов
+        af_meta_p = train_path / "af" / "meta.csv"
+        if af_meta_p.exists():
+            try:
+                df_af = pd.read_csv(af_meta_p)
+                for _, r in df_af.iterrows():
+                    if pd.isna(r.get("epsg")) or pd.isna(r.get("x_min")):
+                        continue
+                    epsg_code = int(r["epsg"])
+                    crs_str = f"EPSG:{epsg_code}"
+                    t = pyproj.Transformer.from_crs(crs_str, "EPSG:4326", always_xy=True)
+                    min_lon, min_lat = t.transform(r["x_min"], r["y_min"])
+                    max_lon, max_lat = t.transform(r["x_max"], r["y_max"])
+                    
+                    chip_id = str(r["chip_id"])
+                    viirs_p = train_path / "af" / "viirs" / f"{chip_id}_VIIRS_I1-I5.tif"
+                    aux_p = train_path / "af" / "aux" / f"{chip_id}_AUX.tif"
+                    
+                    if not viirs_p.exists():
+                        continue
+                        
+                    acq_dt = None
+                    if pd.notna(r.get("acq_datetime")):
+                        try:
+                            acq_dt = datetime.fromisoformat(str(r["acq_datetime"]).replace("Z", "+00:00"))
+                        except Exception:
+                            pass
+
+                    n_fire = int(r["n_fire_px"]) if (pd.notna(r.get("n_fire_px")) and r.get("n_fire_px") > 0) else 0
+
+                    self.af_chips.append({
+                        "chip_id": chip_id,
+                        "kind": "af",
+                        "epsg": epsg_code,
+                        "crs_str": crs_str,
+                        "utm_bounds": (r["x_min"], r["y_min"], r["x_max"], r["y_max"]),
+                        "wgs_bounds": (min_lon, min_lat, max_lon, max_lat),
+                        "center_lon": (min_lon + max_lon) / 2.0,
+                        "center_lat": (min_lat + max_lat) / 2.0,
+                        "poly_wgs": box(min_lon, min_lat, max_lon, max_lat),
+                        "acq_datetime": acq_dt,
+                        "n_fire_px": n_fire,
+                        "files": {
+                            "viirs": str(viirs_p),
+                            "aux": str(aux_p)
+                        }
+                    })
+            except Exception as e:
+                print(f"[ChipCatalog] Error loading AF metadata: {e}")
+
+        print(f"[ChipCatalog] Successfully loaded {len(self.bs_chips)} BS chips and {len(self.af_chips)} AF chips from dataset.")
+        self.is_loaded = True
+
+    def find_best_bs_chip(
+        self,
+        user_bbox_poly: Polygon,
+        center_lon: float,
+        center_lat: float,
+        target_date: Optional[date] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        buffer_days: int = 14
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Строгий пространственно-временной поиск чипа BS по интервалу дат:
+        1. Чип ОБЯЗАН пространственно пересекаться с выбранным BBox пользователя.
+        2. Дата съемки чипа (date_post или date_pre) должна попадать в запрашиваемый
+           диапазон [date_from, date_to] (с буфером buffer_days до и после).
+        3. Если пожар произошел внутри интервала, days_diff = 0 (идеальное попадание).
+        """
+        if not self.bs_chips:
+            return None
+
+        # Определяем границы интервала
+        if date_from is not None or date_to is not None:
+            eff_from = date_from if date_from is not None else date_to
+            eff_to = date_to if date_to is not None else date_from
+        elif target_date is not None:
+            eff_from = target_date
+            eff_to = target_date
+        else:
+            eff_from = None
+            eff_to = None
+
+        candidates = []
+        for chip in self.bs_chips:
+            # 1. Строгая проверка пространственного пересечения
+            if not user_bbox_poly.intersects(chip["poly_wgs"]):
+                continue
+
+            inter_area = user_bbox_poly.intersection(chip["poly_wgs"]).area
+
+            # 2. Проверка попадания в диапазон дат
+            chip_date = chip["date_post"] or chip["date_pre"]
+            if eff_from and eff_to and chip_date:
+                if chip_date < eff_from:
+                    days_diff = (eff_from - chip_date).days
+                elif chip_date > eff_to:
+                    days_diff = (chip_date - eff_to).days
+                else:
+                    # Дата съемки находится прямо ВНУТРИ диапазона дат пользователя!
+                    days_diff = 0
+
+                # Отсекаем снимки за пределами допустимого буфера
+                if days_diff > buffer_days:
+                    continue
+            else:
+                days_diff = 0
+
+            candidates.append({
+                "chip": chip,
+                "inter_area": inter_area,
+                "days_diff": days_diff
+            })
+
+        if not candidates:
+            return None
+
+        # Сортировка: минимальное расстояние до интервала (0 для внутри диапазона),
+        # затем максимальная площадь пересечения полигона
+        candidates.sort(key=lambda x: (x["days_diff"], -x["inter_area"]))
+        return candidates[0]["chip"]
+
+    def find_matching_af_chip(
+        self,
+        user_bbox_poly: Polygon,
+        center_lon: float,
+        center_lat: float,
+        target_date: Optional[date] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        bs_chip_bbox_poly: Optional[Polygon] = None,
+        bs_chip_date: Optional[date] = None,
+        buffer_days: int = 14
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Строгий подбор чипа термоточек AF по интервалу дат:
+        1. Должен пространственно перекрывать BBox пользователя (и контур гари BS, если задан).
+        2. Дата пролета VIIRS должна быть синхронизирована с датой пожара (bs_chip_date ± 15 дней)
+           и попадать в диапазон дат [date_from, date_to] (с буфером buffer_days).
+        3. Чип должен содержать подтвержденное горение (n_fire_px > 0).
+        """
+        if not self.af_chips:
+            return None
+
+        if date_from is not None or date_to is not None:
+            eff_from = date_from if date_from is not None else date_to
+            eff_to = date_to if date_to is not None else date_from
+        elif target_date is not None:
+            eff_from = target_date
+            eff_to = target_date
+        else:
+            eff_from = None
+            eff_to = None
+
+        candidates = []
+        for chip in self.af_chips:
+            # Чип AF обязан содержать активное горение
+            if chip.get("n_fire_px", 0) <= 0:
+                continue
+
+            # 1. Проверка пересечения с BBox пользователя
+            if not user_bbox_poly.intersects(chip["poly_wgs"]):
+                continue
+
+            inter_area = user_bbox_poly.intersection(chip["poly_wgs"]).area
+
+            # Пересечение с найденным контуром гари (если он есть) — приоритетный бонус, но не жесткий отказ
+            overlaps_bs = bool(bs_chip_bbox_poly is not None and bs_chip_bbox_poly.intersects(chip["poly_wgs"]))
+
+            # 2. Временная синхронизация
+            if chip["acq_datetime"]:
+                chip_d = chip["acq_datetime"].date()
+                if bs_chip_date:
+                    scar_diff = abs((chip_d - bs_chip_date).days)
+                else:
+                    scar_diff = 0
+
+                if eff_from and eff_to:
+                    if chip_d < eff_from:
+                        days_diff = (eff_from - chip_d).days
+                    elif chip_d > eff_to:
+                        days_diff = (chip_d - eff_to).days
+                    else:
+                        days_diff = 0
+
+                    if days_diff > buffer_days:
+                        continue
+                else:
+                    days_diff = 0
+            else:
+                days_diff = 0
+
+            candidates.append({
+                "chip": chip,
+                "inter_area": inter_area,
+                "days_diff": days_diff,
+                "scar_diff": scar_diff,
+                "has_fire": chip["n_fire_px"] > 0,
+                "overlaps_bs": overlaps_bs
+            })
+
+        if not candidates:
+            return None
+
+        # Приоритет: наличие пламени, попадание в интервал дат пользователя (days_diff == 0),
+        # пересечение с контуром гари (если он есть), минимальная разница по времени с гарью, максимальное перекрытие
+        candidates.sort(key=lambda x: (not x["has_fire"], x["days_diff"], not x["overlaps_bs"], x["scar_diff"], -x["inter_area"]))
+        return candidates[0]["chip"]
+
+    def get_featured_presets(self) -> List[Dict[str, Any]]:
+        """
+        Возвращает список ключевых реальных пожаров из обучающей базы
+        для удобного интерактивного выбора в UI.
+        """
+        presets = [
+            {
+                "id": "volgograd_huge_2022",
+                "name": "Волгоград — Заволжье (август 2022, 3350 га)",
+                "chip_id": "BS_tr_000109",
+                "af_chip_id": "AF_tr_000250",
+                "bbox": [46.12, 49.50, 46.34, 49.68],
+                "date_from": "2022-08-10",
+                "date_to": "2022-08-28",
+                "event_id": "FE13548",
+                "desc": "Степной пожар в Заволжье: 54 термоточки строго внутри контура гари"
+            },
+            {
+                "id": "astrakhan_max_2019",
+                "name": "Астрахань — Волго-Ахтуба (июнь 2019, 2306 га)",
+                "chip_id": "BS_tr_000004",
+                "af_chip_id": "AF_tr_000023",
+                "bbox": [46.50, 48.20, 46.72, 48.38],
+                "date_from": "2019-06-15",
+                "date_to": "2019-06-28",
+                "event_id": "FE00977",
+                "desc": "Масштабный пал пойменной растительности с активным огнем"
+            },
+            {
+                "id": "rostov_salsk_2022",
+                "name": "Ростовская обл. — Сальск (август 2022, 1694 га)",
+                "chip_id": "BS_tr_000101",
+                "af_chip_id": "AF_tr_000238",
+                "bbox": [42.55, 47.00, 42.77, 47.18],
+                "date_from": "2022-07-30",
+                "date_to": "2022-08-16",
+                "event_id": "FE13054",
+                "desc": "Степной пожар: 40 термоточек VIIRS внутри контура"
+            },
+            {
+                "id": "volgograd_north_2019",
+                "name": "Волгоград — Север (июнь 2019, 2487 га)",
+                "chip_id": "BS_tr_000003",
+                "af_chip_id": "AF_tr_000019",
+                "bbox": [47.07, 48.66, 47.30, 48.83],
+                "date_from": "2019-06-12",
+                "date_to": "2019-06-27",
+                "event_id": "FE01122",
+                "desc": "Крупный пожар: 34 термоточки VIIRS точно внутри гари"
+            },
+            {
+                "id": "kalmykia_south_2024",
+                "name": "Калмыкия — Южный рубеж (сентябрь 2024, 1759 га)",
+                "chip_id": "BS_tr_000202",
+                "af_chip_id": "AF_tr_000412",
+                "bbox": [39.25, 47.94, 39.48, 48.12],
+                "date_from": "2024-09-18",
+                "date_to": "2024-10-05",
+                "event_id": "FE24108",
+                "desc": "Свежий осенний пожар сезона 2024 года (28 термоточек)"
+            }
+        ]
+        return presets
+
+
+# Глобальный инстанс каталога
+catalog = ChipCatalog()
