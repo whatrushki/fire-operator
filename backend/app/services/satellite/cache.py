@@ -29,10 +29,12 @@ class SceneCache:
         max_size_gb: float = 2.0
     ):
         self.cache_dir = Path(cache_dir)
+        self.enabled = (ttl_hours > 0)
         self.ttl_seconds = int(ttl_hours * 3600)
         self.max_size_bytes = int(max_size_gb * 1024 * 1024 * 1024)
         self._lock = threading.Lock()
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        if self.enabled:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def generate_key(prefix: str, *args, **kwargs) -> str:
@@ -47,6 +49,8 @@ class SceneCache:
 
     def get_json(self, key: str) -> Optional[Any]:
         """Получить кэшированный JSON-объект, если срок жизни не истек."""
+        if not self.enabled:
+            return None
         with self._lock:
             entry_dir = self._get_entry_dir(key)
             meta_path = entry_dir / "meta.json"
@@ -70,6 +74,8 @@ class SceneCache:
 
     def put_json(self, key: str, data: Any, extra_meta: Optional[Dict[str, Any]] = None) -> bool:
         """Сохранить JSON-объект в кэш."""
+        if not self.enabled:
+            return False
         with self._lock:
             try:
                 entry_dir = self._get_entry_dir(key)
@@ -94,6 +100,8 @@ class SceneCache:
 
     def get_file_path(self, key: str, filename: str) -> Optional[Path]:
         """Возвращает путь к кэшированному файлу, если запись актуальна."""
+        if not self.enabled:
+            return None
         with self._lock:
             entry_dir = self._get_entry_dir(key)
             meta_path = entry_dir / "meta.json"
@@ -121,6 +129,8 @@ class SceneCache:
         extra_meta: Optional[Dict[str, Any]] = None
     ) -> Optional[Path]:
         """Сохраняет бинарный файл в запись кэша."""
+        if not self.enabled:
+            return None
         with self._lock:
             try:
                 entry_dir = self._get_entry_dir(key)

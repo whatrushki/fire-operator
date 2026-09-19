@@ -217,25 +217,31 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                     date_to=d_to.date()
                 )
 
-            matched_bs = catalog.find_best_bs_chip(
-                user_bbox_poly=user_bbox_poly,
-                center_lon=center_lon,
-                center_lat=center_lat,
-                date_from=d_from.date(),
-                date_to=d_to.date()
-            )
+            # В режиме ONLINE не подменяем отсутствующие живые снимки архивными чипами!
+            # Архивный поиск BS и AF выполняется только для OFFLINE или HYBRID
+            req_source_val = getattr(req, "data_source", None) or getattr(settings, "DATA_SOURCE_MODE", "offline")
+            is_strict_online = (req_source_val.lower().strip() == "online") if isinstance(req_source_val, str) else False
 
-            # Если онлайн-точки не были получены (режим offline или fallback), ищем чип VIIRS в архиве
-            if online_af_pts is None:
-                matched_af = catalog.find_matching_af_chip(
+            if not is_strict_online:
+                matched_bs = catalog.find_best_bs_chip(
                     user_bbox_poly=user_bbox_poly,
                     center_lon=center_lon,
                     center_lat=center_lat,
                     date_from=d_from.date(),
-                    date_to=d_to.date(),
-                    bs_chip_bbox_poly=matched_bs["poly_wgs"] if matched_bs else None,
-                    bs_chip_date=matched_bs["date_post"] if matched_bs else None
+                    date_to=d_to.date()
                 )
+
+                # Если онлайн-точки не были получены (режим offline или fallback), ищем чип VIIRS в архиве
+                if online_af_pts is None:
+                    matched_af = catalog.find_matching_af_chip(
+                        user_bbox_poly=user_bbox_poly,
+                        center_lon=center_lon,
+                        center_lat=center_lat,
+                        date_from=d_from.date(),
+                        date_to=d_to.date(),
+                        bs_chip_bbox_poly=matched_bs["poly_wgs"] if matched_bs else None,
+                        bs_chip_date=matched_bs["date_post"] if matched_bs else None
+                    )
 
         has_online_af = (online_af_pts is not None and len(online_af_pts) > 0)
         is_out_of_coverage = (region_key is None and matched_bs is None and matched_af is None and not has_online_af)
@@ -589,6 +595,16 @@ def analyze_area(request: SpatialTemporalRequest, background_tasks: BackgroundTa
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Полигон территории должен содержать как минимум 3 вершины."
+            )
+
+    # 4. Проверка доступности спутникового онлайн-режима
+    raw_source = (request.data_source or getattr(settings, "DATA_SOURCE_MODE", "offline")).lower().strip()
+    if raw_source == "online":
+        sat_provider = get_satellite_provider("online")
+        if not sat_provider.check_reachability():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Спутниковый онлайн-режим недоступен: отсутствует подключение к сети Интернет или спутниковым сервисам NASA/Copernicus."
             )
 
     task_id = f"tsk_{uuid.uuid4().hex[:8]}"
