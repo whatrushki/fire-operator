@@ -113,12 +113,12 @@ map_html_path = os.path.join(settings.TEMPLATES_DIR, "map.html")
 )
 def root_map():
     """Открывает полноэкранный картографический интерфейс с визуализацией термоточек и контуров гарей."""
+    if os.path.exists(map_html_path):
+        with open(map_html_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
     index_html = os.path.join(frontend_dist, "index.html")
     if os.path.exists(index_html):
         with open(index_html, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
-    if os.path.exists(map_html_path):
-        with open(map_html_path, "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
     return HTMLResponse(content="<h1>Fire-Operator GIS Service</h1><p><a href='/docs'>Swagger API</a></p>")
 
@@ -132,6 +132,21 @@ def root_map():
 def get_map():
     """Прямая ссылка на картографический интерфейс."""
     return root_map()
+
+
+@app.get(
+    "/react",
+    response_class=HTMLResponse,
+    tags=["Картографический веб-интерфейс (GIS UI)"],
+    summary="Экспериментальный React Deck.GL интерфейс"
+)
+def get_react_app():
+    """Прямая ссылка на React/Deck.GL интерфейс."""
+    index_html = os.path.join(frontend_dist, "index.html")
+    if os.path.exists(index_html):
+        with open(index_html, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>React frontend build not found</h1>", status_code=404)
 
 
 @app.get("/favicon.svg", include_in_schema=False)

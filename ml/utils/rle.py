@@ -56,11 +56,11 @@ def rle_decode(rle_str: str, shape: tuple[int, int]) -> np.ndarray:
         2D numpy array uint8 с 0 и 1.
     """
     mask = np.zeros(shape[0] * shape[1], dtype=np.uint8)
-    if not rle_str or rle_str == '""' or rle_str == 'nan':
+    if rle_str is None or not isinstance(rle_str, str):
         return mask.reshape(shape)
         
     clean_str = rle_str.strip().strip('"').strip("'")
-    if not clean_str:
+    if not clean_str or clean_str.lower() in ('""', "''", 'nan', 'none'):
         return mask.reshape(shape)
         
     items = list(map(int, clean_str.split()))

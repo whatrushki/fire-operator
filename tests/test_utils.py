@@ -11,6 +11,9 @@ def test_rle():
     empty_mask = np.zeros((256, 256), dtype=np.uint8)
     assert rle_encode(empty_mask) == '""', "Empty mask encoding failed"
     assert np.array_equal(rle_decode('""', (256, 256)), empty_mask), "Empty decode failed"
+    assert np.array_equal(rle_decode(None, (256, 256)), empty_mask), "None decode failed"
+    assert np.array_equal(rle_decode(float('nan'), (256, 256)), empty_mask), "NaN float decode failed"
+    assert np.array_equal(rle_decode('nan', (256, 256)), empty_mask), "NaN str decode failed"
 
     # Random sparse mask
     np.random.seed(42)
