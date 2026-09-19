@@ -454,6 +454,28 @@
         </div>
       </div>
 
+      <div class="panel-section">
+        <div class="section-title">🛰️ Источник данных</div>
+        <div class="form-group">
+          <div style="display: flex; gap: 6px; align-items: center;">
+            <select id="data-source-select" style="flex: 1;">
+              <option value="offline" selected>📁 Офлайн (архив чипов)</option>
+              <option value="online">🛰️ Онлайн (спутники)</option>
+              <option value="hybrid">🔄 Гибрид (онлайн + fallback)</option>
+            </select>
+            <span id="sat-status-dot" title="Статус подключения" style="
+              width: 10px; height: 10px; border-radius: 50%;
+              background: #6b7280; display: inline-block; flex-shrink: 0;
+            "></span>
+          </div>
+          <div id="online-info" style="display: none; margin-top: 8px; padding: 8px 10px; background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.3); border-radius: 6px; font-size: 11px; color: #93c5fd;">
+            <div>🔥 Термоточки: <b>NASA FIRMS</b> (VIIRS NRT, ~3 ч)</div>
+            <div>🗺️ Снимки: <b>Copernicus CDSE</b> (Sentinel-2/1, 10-20 м)</div>
+            <div id="sat-scene-meta" style="margin-top: 4px; display: none; color: #a5b4fc;"></div>
+          </div>
+        </div>
+      </div>
+
       <button id="btn-run" class="btn-submit">
         <span>🚀 Запустить космический анализ</span>
       </button>
@@ -635,6 +657,40 @@
       }
     });
 
+    // Управление источником данных и диагностика спутников
+    const dataSourceSelect = document.getElementById('data-source-select');
+    const onlineInfo = document.getElementById('online-info');
+    const satStatusDot = document.getElementById('sat-status-dot');
+
+    function checkSatelliteStatus() {
+      fetch('/api/v1/satellites/status')
+        .then(r => r.json())
+        .then(data => {
+          const firmsOk = data.firms && data.firms.configured;
+          const cdseOk = data.cdse && data.cdse.configured;
+          if (firmsOk || cdseOk) {
+            satStatusDot.style.background = '#22c55e';
+            satStatusDot.title = `Спутники готовы: FIRMS: ${firmsOk ? 'OK' : 'нет ключа'}, CDSE: ${cdseOk ? 'OK' : 'нет ключа'}`;
+          } else {
+            satStatusDot.style.background = '#eab308';
+            satStatusDot.title = 'Онлайн-спутники: локальный архив чипов активен (ключи в .env не заданы)';
+          }
+        })
+        .catch(() => {
+          satStatusDot.style.background = '#6b7280';
+        });
+    }
+    checkSatelliteStatus();
+
+    dataSourceSelect.addEventListener('change', () => {
+      const mode = dataSourceSelect.value;
+      if (mode === 'online' || mode === 'hybrid') {
+        onlineInfo.style.display = 'block';
+      } else {
+        onlineInfo.style.display = 'none';
+      }
+    });
+
     // -------------------------------------------------------------
     // Интерактивная ручная разметка границ прямо кликами по карте
     // -------------------------------------------------------------
@@ -792,12 +848,16 @@
       burnLayerGroup.clearLayers();
       thermalLayerGroup.clearLayers();
 
+      const dataSourceSelect = document.getElementById('data-source-select');
+      const dataSource = dataSourceSelect.value;
+
       const payload = {
         bbox: bbox,
         region: chosenRegion !== 'custom' ? chosenRegion : null,
         date_from: document.getElementById('date-from').value,
         date_to: document.getElementById('date-to').value,
-        include_radar: true
+        include_radar: true,
+        data_source: dataSource
       };
 
       try {
@@ -940,6 +1000,14 @@
         document.getElementById('link-geojson').href = `/api/v1/export/geojson/${taskId}`;
         document.getElementById('link-shp').href = `/api/v1/export/shapefile/${taskId}`;
         document.getElementById('link-report').href = `/api/v1/export/report/${taskId}`;
+
+        if (rep.data_source) {
+          const srcMetaEl = document.getElementById('sat-scene-meta');
+          if (srcMetaEl) {
+            srcMetaEl.style.display = 'block';
+            srcMetaEl.innerHTML = `📡 Источник анализа: <b>${rep.data_source}</b> (${rep.model_af || ''})`;
+          }
+        }
 
         statusBanner.style.display = 'none';
         reportCard.style.display = 'block';

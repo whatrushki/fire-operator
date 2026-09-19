@@ -36,6 +36,7 @@ if settings.PROJECT_ROOT not in sys.path:
 from ml.features_af import extract_af_features
 from ml.features_bs import extract_bs_features
 from app.services.chip_catalog import catalog
+from app.services.satellite import get_satellite_provider
 from app.schemas.fire import (
     SpatialTemporalRequest,
     TaskInitResponse,
@@ -191,10 +192,31 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
         # Зимний период (ноябрь - март): естественные ландшафтные пожары отсутствуют
         is_winter = (d_from.month in [11, 12, 1, 2, 3]) and (d_to.month in [11, 12, 1, 2, 3]) and (d_to - d_from).days < 180
 
+        # Инициализация гибридного провайдера спутниковых данных (Offline / Online / Hybrid)
+        sat_provider = get_satellite_provider(req.data_source)
+        online_af_pts = None
+        af_meta = {}
+        sat_scenes_info = None
+
         # Динамический пространственно-временной подбор спутниковой сцены из каталога
         matched_bs = None
         matched_af = None
         if not is_winter:
+            # 1. Запрос оперативных термоточек через SatelliteDataProvider (NASA FIRMS при online/hybrid)
+            online_af_pts, af_tag, af_meta = sat_provider.get_thermal_points(
+                bbox=(min_lon, min_lat, max_lon, max_lat),
+                date_from=d_from.date(),
+                date_to=d_to.date()
+            )
+
+            # 2. Информационный поиск сцен Sentinel-2/1 в Copernicus CDSE
+            if sat_provider.is_online_enabled():
+                sat_scenes_info = sat_provider.query_available_satellite_scenes(
+                    bbox=(min_lon, min_lat, max_lon, max_lat),
+                    date_from=d_from.date(),
+                    date_to=d_to.date()
+                )
+
             matched_bs = catalog.find_best_bs_chip(
                 user_bbox_poly=user_bbox_poly,
                 center_lon=center_lon,
@@ -202,23 +224,27 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                 date_from=d_from.date(),
                 date_to=d_to.date()
             )
-            matched_af = catalog.find_matching_af_chip(
-                user_bbox_poly=user_bbox_poly,
-                center_lon=center_lon,
-                center_lat=center_lat,
-                date_from=d_from.date(),
-                date_to=d_to.date(),
-                bs_chip_bbox_poly=matched_bs["poly_wgs"] if matched_bs else None,
-                bs_chip_date=matched_bs["date_post"] if matched_bs else None
-            )
 
-        is_out_of_coverage = (region_key is None and matched_bs is None and matched_af is None)
+            # Если онлайн-точки не были получены (режим offline или fallback), ищем чип VIIRS в архиве
+            if online_af_pts is None:
+                matched_af = catalog.find_matching_af_chip(
+                    user_bbox_poly=user_bbox_poly,
+                    center_lon=center_lon,
+                    center_lat=center_lat,
+                    date_from=d_from.date(),
+                    date_to=d_to.date(),
+                    bs_chip_bbox_poly=matched_bs["poly_wgs"] if matched_bs else None,
+                    bs_chip_date=matched_bs["date_post"] if matched_bs else None
+                )
+
+        has_online_af = (online_af_pts is not None and len(online_af_pts) > 0)
+        is_out_of_coverage = (region_key is None and matched_bs is None and matched_af is None and not has_online_af)
         is_explicit_sample_region = bool(req.region and req.region.lower() in ["volgograd", "kalmykia", "rostov", "astrakhan"])
 
         # Контуры гарей BS: рассчитываются, если найдена сцена Sentinel-2 на эти даты или явно выбран пресет региона
         has_bs_scene = (matched_bs is not None) or is_explicit_sample_region
-        # Термоточки AF: рассчитываются, если найден чип активного горения VIIRS на эти даты или явно выбран пресет региона
-        has_af_scene = (matched_af is not None) or is_explicit_sample_region
+        # Термоточки AF: рассчитываются, если есть онлайн-точки FIRMS, найден чип VIIRS или выбран пресет региона
+        has_af_scene = has_online_af or (matched_af is not None) or is_explicit_sample_region
 
         mask = np.zeros((512, 512), dtype=np.uint8)
         features = []
@@ -311,8 +337,10 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
             # 5. Инференс обученной модели Active Fire (VIIRS AF)
             # -------------------------------------------------------------
             if has_af_scene:
-                af_model = get_af_model()
-                if af_model is not None:
+                if online_af_pts is not None:
+                    thermal_points = online_af_pts
+                elif get_af_model() is not None:
+                    af_model = get_af_model()
                     if matched_af:
                         af_files = matched_af["files"]
                         af_utm_min_x, af_utm_min_y, af_utm_max_x, af_utm_max_y = matched_af["utm_bounds"]
@@ -340,7 +368,7 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                         probs = af_model.predict_proba(X_af)[:, 1]
                         i4_vals = X_af[:, 0]
                         dt_vals = X_af[:, 2]
-                        pred_af = ((probs > 0.85) & (i4_vals > 305.0) & (dt_vals > 4.0)) | (i4_vals >= 366.5)
+                        pred_af = ((probs > 0.90) & (i4_vals > 300.0) & (dt_vals > 3.0)) | (i4_vals >= 366.5)
                         af_mask = pred_af.astype(np.uint8).reshape((256, 256))
 
                         py_pts, px_pts = np.where(af_mask == 1)
@@ -457,7 +485,9 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
             "spatial_resolution_m": settings.PIXEL_SIZE_BS_M,
             "summary_message": summary_message,
             "calculation_method": "Точный геодезический попиксельный учет проекции UTM (0.04 га/пикс)",
-            "model_af": "VIIRS Physics LogisticRegression + SaturationGuard",
+            "data_source": af_meta.get("provider", sat_provider.mode.value),
+            "satellite_metadata": sat_scenes_info,
+            "model_af": "NASA FIRMS VIIRS NRT (375m)" if online_af_pts is not None else "VIIRS Physics LogisticRegression + SaturationGuard",
             "model_bs": "Sentinel-2/1 Multi-spectral Context MLP (22 features)",
             "scene_chip_id": matched_bs["chip_id"] if matched_bs else None,
             "fire_event_id": matched_bs.get("fire_event_id") if matched_bs else None,
@@ -801,3 +831,15 @@ def health_check():
 def get_presets():
     """Возвращает список подтвержденных исторических пожаров из базы космического мониторинга."""
     return JSONResponse(content={"presets": catalog.get_featured_presets()})
+
+
+@router.get(
+    "/satellites/status",
+    summary="Диагностический статус подключения к онлайн-спутникам",
+    tags=["Спутниковый мониторинг (Online Satellites)"]
+)
+def get_satellites_status():
+    """Возвращает готовность провайдеров NASA FIRMS и Copernicus CDSE, а также состояние кэша."""
+    provider = get_satellite_provider()
+    return JSONResponse(content=provider.get_service_status())
+

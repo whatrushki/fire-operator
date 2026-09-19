@@ -64,7 +64,7 @@ def _process_single_af(item):
         # Физическая фильтрация с учетом калиброванного соревновательного порога
         i4 = X[:, 0]
         dt = X[:, 2]
-        pred_bin = ((probs > 0.85) & (i4 > 305.0) & (dt > 4.0)) | (i4 >= 366.5)
+        pred_bin = ((probs > 0.90) & (i4 > 300.0) & (dt > 3.0)) | (i4 >= 366.5)
         mask = pred_bin.astype(np.uint8).reshape((256, 256))
         return chip_id, 1, rle_encode(mask)
     except Exception as e:

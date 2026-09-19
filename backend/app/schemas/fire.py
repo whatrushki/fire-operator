@@ -58,6 +58,10 @@ class SpatialTemporalRequest(BaseModel):
         default=None,
         description="Кодовое наименование региона (volgograd, kalmykia, rostov, astrakhan или custom)."
     )
+    data_source: Optional[str] = Field(
+        default=None,
+        description="Источник данных: 'offline' (архив чипов), 'online' (NASA FIRMS + Copernicus CDSE), 'hybrid' (онлайн с fallback). При None берётся из конфига сервера."
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -145,6 +149,14 @@ class AnalyticalReport(BaseModel):
     summary_message: Optional[str] = Field(
         None,
         description="Официальное текстовое заключение по результатам космического анализа"
+    )
+    data_source: str = Field(
+        default="offline",
+        description="Использованный источник данных: offline (архив чипов) / online (NASA FIRMS + Copernicus CDSE)"
+    )
+    satellite_metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Метаданные спутниковых сцен (ID, дата съёмки, облачность) при использовании онлайн-источника"
     )
     calculation_method: str = Field(
         default="Точный геодезический попиксельный учет проекции UTM (0.04 га/пикс)",
