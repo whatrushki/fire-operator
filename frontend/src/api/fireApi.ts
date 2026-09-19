@@ -50,6 +50,26 @@ export interface BackendSeverityBreakdown {
   percentage: number;
 }
 
+export interface SpectralMetrics {
+  date_pre?: string;
+  date_post?: string;
+  mean_nbr_pre?: number;
+  mean_nbr_post?: number;
+  max_dnbr?: number;
+}
+
+export interface DirectSceneMeta {
+  source?: string;
+  scene_id?: string;
+  pre_scene_id?: string;
+  date_pre?: string;
+  date_post?: string;
+  cloud_cover?: number;
+  mean_nbr_pre?: number;
+  mean_nbr_post?: number;
+  max_dnbr?: number;
+}
+
 export interface BackendAnalyticalReport {
   task_id: string;
   region?: string;
@@ -62,6 +82,14 @@ export interface BackendAnalyticalReport {
   calculation_method: string;
   model_af?: string;
   model_bs?: string;
+  nearest_scene?: {
+    chip_id: string;
+    distance_km: number;
+    date_pre: string;
+    date_post: string;
+  } | null;
+  direct_scene?: DirectSceneMeta | null;
+  spectral_metrics?: SpectralMetrics | null;
 }
 
 export interface BurnContourFeature {

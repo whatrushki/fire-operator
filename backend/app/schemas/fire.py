@@ -143,6 +143,8 @@ class AnalyticalReport(BaseModel):
     model_af: Optional[str] = Field(None, description="Использованная модель / источник Active Fire")
     model_bs: Optional[str] = Field(None, description="Использованная модель / источник Burn Severity")
     nearest_scene: Optional[Dict[str, Any]] = Field(None, description="Информация о ближайшей спутниковой сцене при отсутствии прямого перекрытия")
+    direct_scene: Optional[Dict[str, Any]] = Field(None, description="Информация о напрямую обработанной сцене Sentinel-2")
+    spectral_metrics: Optional[Dict[str, Any]] = Field(None, description="Спектральные метрики растительности (NBR до, NBR после, dNBR)")
     calculation_method: str = Field(
         default="Точный геодезический попиксельный учет проекции UTM (0.04 га/пикс)",
         description="Методика расчета площадей"

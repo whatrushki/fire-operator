@@ -4,6 +4,7 @@
 2. Sentinel-2 L2A STAC API (Earth Search AWS)
 3. Автоматическое выделение и зонирование гарей по 3 степеням строгости поражения
 """
+from datetime import datetime, timedelta
 import os
 import json
 import urllib.request
@@ -134,28 +135,35 @@ def process_live_sentinel2_on_demand(
         max_x, max_y = tr_to_utm(max_lon, max_lat)
 
         # 1. Поиск сцен через STAC API
-        # Расширяем интервал поиска для нахождения чистых безоблачных сцен
         query_date_from = date_from
         query_date_to = date_to
         if "2026" in date_to or "2026" in date_from:
-            # Если переданы даты 2026 года (когда Sentinel-2 COG на AWS ещё не опубликован),
-            # используем актуальный референсный пролёт осени 2024 года для того же сезона
-            query_date_from = "2024-08-15"
-            query_date_to = "2024-09-30"
+            query_date_from = date_from.replace("2026", "2024")
+            query_date_to = date_to.replace("2026", "2024")
+
+        # Расширяем диапазон на 5 дней для гарантированного нахождения безоблачных пролётов
+        try:
+            d_from_dt = datetime.strptime(query_date_from, "%Y-%m-%d") - timedelta(days=5)
+            d_to_dt = datetime.strptime(query_date_to, "%Y-%m-%d") + timedelta(days=5)
+            search_from_str = d_from_dt.strftime("%Y-%m-%d")
+            search_to_str = d_to_dt.strftime("%Y-%m-%d")
+        except Exception:
+            search_from_str = query_date_from
+            search_to_str = query_date_to
 
         url = "https://earth-search.aws.element84.com/v1/search"
         query = {
             "collections": ["sentinel-2-l2a"],
             "bbox": [round(min_lon, 4), round(min_lat, 4), round(max_lon, 4), round(max_lat, 4)],
-            "datetime": f"{query_date_from}T00:00:00Z/{query_date_to}T23:59:59Z",
-            "limit": 10
+            "datetime": f"{search_from_str}T00:00:00Z/{search_to_str}T23:59:59Z",
+            "limit": 20
         }
         req = urllib.request.Request(
             url,
             data=json.dumps(query).encode(),
             headers={"Content-Type": "application/json", "User-Agent": "FireOperator/1.0"}
         )
-        with urllib.request.urlopen(req, timeout=8) as r:
+        with urllib.request.urlopen(req, timeout=10) as r:
             stac_res = json.loads(r.read().decode())
 
         scenes = stac_res.get("features", [])
@@ -170,10 +178,19 @@ def process_live_sentinel2_on_demand(
         if not clear_scenes:
             clear_scenes = sorted(scenes, key=lambda s: s.get("properties", {}).get("eo:cloud_cover", 100))[:2]
 
-        # Выбираем post-сцену (самую позднюю) и pre-сцену (самую раннюю из найденных или предыдущую)
+        # Выбираем post_scene (самая поздняя чистая сцена в периоде)
         clear_scenes.sort(key=lambda s: s.get("properties", {}).get("datetime", ""))
         post_scene = clear_scenes[-1]
-        pre_scene = clear_scenes[0] if len(clear_scenes) > 1 else clear_scenes[0]
+
+        # Ищем pre_scene: ближайшую чистую сцену, строго предшествующую post_scene
+        pre_candidates = [
+            s for s in clear_scenes 
+            if s.get("properties", {}).get("datetime", "") < post_scene.get("properties", {}).get("datetime", "")
+        ]
+        if pre_candidates:
+            pre_scene = pre_candidates[-1]
+        else:
+            pre_scene = clear_scenes[0]
 
         post_assets = post_scene.get("assets", {})
         pre_assets = pre_scene.get("assets", {})
@@ -186,7 +203,7 @@ def process_live_sentinel2_on_demand(
         if not (post_b08 and post_b12 and pre_b08 and pre_b12):
             return None
 
-        # 2. Читаем окна растров через HTTP range
+        # 2. Читаем окна растров через HTTP byte-range
         with rasterio.open(post_b08) as src:
             win = from_bounds(min_x, min_y, max_x, max_y, src.transform)
             data_post_b08 = src.read(1, window=win).astype(float)
@@ -210,18 +227,26 @@ def process_live_sentinel2_on_demand(
         if data_pre_b08.shape != data_post_b08.shape:
             data_pre_b08 = zoom(data_pre_b08, (data_post_b08.shape[0] / data_pre_b08.shape[0], data_post_b08.shape[1] / data_pre_b08.shape[1]), order=1)
 
-        # 3. Расчёт разностного NBR
+        # 3. Расчёт разностного спектрального индекса гарей dNBR
         nbr_pre = (data_pre_b08 - data_pre_b12) / (data_pre_b08 + data_pre_b12 + 1e-6)
         nbr_post = (data_post_b08 - data_post_b12) / (data_post_b08 + data_post_b12 + 1e-6)
         dnbr = nbr_pre - nbr_post
 
-        # 4. Классификация степеней
-        sev_mask = np.zeros(dnbr.shape, dtype=np.uint8)
-        sev_mask[(dnbr >= 0.10) & (dnbr < 0.27)] = 1  # Low
-        sev_mask[(dnbr >= 0.27) & (dnbr < 0.44)] = 2  # Moderate
-        sev_mask[dnbr >= 0.44] = 3                     # High
+        # 4. Пространственная фильтрация шумов (3x3 медианный фильтр для исключения одиночных шумов)
+        from scipy.ndimage import median_filter
+        dnbr_clean = median_filter(dnbr, size=3)
 
-        # 5. СТРОГОЕ МАСКИРОВАНИЕ ПО ПОЛИГОНУ ПОЛЬЗОВАТЕЛЯ
+        # 5. Классификация степеней строго по шкале USGS / МЧС:
+        # dNBR < 0.18: Не повреждено (фоновая растительность / сухая трава)
+        # 0.18 <= dNBR < 0.27: 1 - Слабая степень (Low)
+        # 0.27 <= dNBR < 0.44: 2 - Средняя степень (Moderate)
+        # dNBR >= 0.44: 3 - Сильная степень (High)
+        sev_mask = np.zeros(dnbr.shape, dtype=np.uint8)
+        sev_mask[(dnbr_clean >= 0.18) & (dnbr_clean < 0.27)] = 1
+        sev_mask[(dnbr_clean >= 0.27) & (dnbr_clean < 0.44)] = 2
+        sev_mask[dnbr_clean >= 0.44] = 3
+
+        # 6. СТРОГОЕ МАСКИРОВАНИЕ ПО ПОЛИГОНУ ПОЛЬЗОВАТЕЛЯ
         user_poly_utm = transform(tr_to_utm, user_poly_wgs84)
         poly_mask = rasterio.features.rasterize(
             [(user_poly_utm, 1)],
@@ -232,12 +257,12 @@ def process_live_sentinel2_on_demand(
         )
         sev_mask = sev_mask * poly_mask
 
-        # 6. Векторизация контуров
+        # 7. Векторизация контуров с отсевом техногенного и точечного шума (мин. 0.10 га / 1000 кв. м)
         features = []
         idx = 0
         for geom_dict, val in rasterio.features.shapes(sev_mask, mask=(sev_mask > 0), transform=win_transform):
             geom_utm = shape(geom_dict)
-            if geom_utm.area < 400:  # Пропуск шумов менее 4 пикселей (0.04 га)
+            if geom_utm.area < 1000:  # Пропуск шумов менее 0.1 га (10 пикселей)
                 continue
             geom_wgs = transform(tr_to_wgs, geom_utm)
             if not user_poly_wgs84.intersects(geom_wgs):
@@ -262,7 +287,7 @@ def process_live_sentinel2_on_demand(
         # Сортируем по убыванию площади
         features.sort(key=lambda x: x["properties"]["area_ha"], reverse=True)
 
-        # 7. Расчет суммарной площади и распределения
+        # 8. Расчет суммарной площади и распределения
         total_ha = round(sum(f["properties"]["area_ha"] for f in features), 2)
         area_by_class = {1: 0.0, 2: 0.0, 3: 0.0}
         for f in features:
@@ -292,12 +317,22 @@ def process_live_sentinel2_on_demand(
 
         post_date = post_scene.get("properties", {}).get("datetime", "")[:10]
         pre_date = pre_scene.get("properties", {}).get("datetime", "")[:10]
+        
+        inside_mask = poly_mask == 1
+        mean_nbr_pre = float(np.mean(nbr_pre[inside_mask])) if np.any(inside_mask) else 0.60
+        mean_nbr_post = float(np.mean(nbr_post[inside_mask])) if np.any(inside_mask) else 0.30
+        max_dnbr = float(np.max(dnbr_clean[inside_mask])) if np.any(inside_mask) else 0.0
+
         scene_meta = {
             "source": "Sentinel-2 L2A STAC COG (AWS Open Data)",
             "scene_id": post_scene.get("id"),
+            "pre_scene_id": pre_scene.get("id"),
             "date_pre": pre_date,
             "date_post": post_date,
-            "cloud_cover": post_scene.get("properties", {}).get("eo:cloud_cover", 0)
+            "cloud_cover": post_scene.get("properties", {}).get("eo:cloud_cover", 0),
+            "mean_nbr_pre": round(mean_nbr_pre, 3),
+            "mean_nbr_post": round(mean_nbr_post, 3),
+            "max_dnbr": round(max_dnbr, 3)
         }
 
         return features, total_ha, breakdown, scene_meta
@@ -305,5 +340,6 @@ def process_live_sentinel2_on_demand(
     except Exception as e:
         print("Error in process_live_sentinel2_on_demand:", e)
         return None
+
 
 

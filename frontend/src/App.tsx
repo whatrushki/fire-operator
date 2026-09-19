@@ -362,6 +362,7 @@ export function App() {
         hotspotsCount={currentReport?.active_thermal_anomalies_count ?? (thermalGeoJson?.features?.length ?? 0)}
         isSplitView={isSplitView}
         onToggleSplitView={() => setIsSplitView((prev) => !prev)}
+        report={currentReport}
       />
     </div>
   );

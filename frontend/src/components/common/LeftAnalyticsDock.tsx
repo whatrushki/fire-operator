@@ -305,15 +305,27 @@ export const LeftAnalyticsDock: React.FC<LeftAnalyticsDockProps> = ({
           </div>
         </div>
 
-        {/* SENSING CONTEXT / NEAREST PASS INFO */}
-        {report && (report as any).nearest_scene && (
+        {/* SENSING CONTEXT / DIRECT OR NEAREST PASS INFO */}
+        {report && (report as any).direct_scene && (
+          <div className="p-2.5 rounded-2xl bg-emerald-950/40 border border-emerald-500/30 text-[11px] text-emerald-200 space-y-1">
+            <div className="flex items-center gap-1.5 font-bold text-emerald-300">
+              <Sparkles className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>Прямой снимок ДЗЗ (Sentinel-2 L2A)</span>
+            </div>
+            <p className="text-[10px] text-neutral-300 leading-tight">
+              Сцена <span className="font-mono text-white font-bold">{(report as any).direct_scene.scene_id}</span> загружена и проанализирована непосредственно для выбранного полигона (облачность {Number((report as any).direct_scene.cloud_cover ?? 0).toFixed(1)}%).
+            </p>
+          </div>
+        )}
+
+        {report && !(report as any).direct_scene && (report as any).nearest_scene && (
           <div className="p-2.5 rounded-2xl bg-cyan-950/40 border border-cyan-500/30 text-[11px] text-cyan-200 space-y-1">
             <div className="flex items-center gap-1.5 font-bold text-cyan-300">
               <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
               <span>Смежный спутниковый снимок</span>
             </div>
             <p className="text-[10px] text-neutral-300 leading-tight">
-              Для точного квадрата прямых снимков нет. Подключена сцена <span className="font-mono text-white font-bold">{(report as any).nearest_scene.chip_id}</span> ({(report as any).nearest_scene.distance_km} км от полигона).
+              Для точного квадрата прямых снимков нет. Подключена архивная сцена <span className="font-mono text-white font-bold">{(report as any).nearest_scene.chip_id}</span> ({(report as any).nearest_scene.distance_km} км от полигона).
             </p>
           </div>
         )}
