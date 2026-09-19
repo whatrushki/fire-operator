@@ -55,21 +55,27 @@ def extract_af_features(viirs_data: np.ndarray, aux_data: np.ndarray) -> np.ndar
     delta_t = i4_clean - i5_clean
     delta_t_air = i4_clean - np.nan_to_num(t2m, nan=290.0)
     
-    # 3. Контекстные статистики фона (окно 21x21)
-    # Быстрый расчет локального среднего и дисперсии
-    mean_i4 = uniform_filter(i4_clean, size=21, mode='reflect')
-    mean_i4_sq = uniform_filter(i4_clean**2, size=21, mode='reflect')
+    # 3. Контекстные статистики фона (окно 21x21) с исключением потенциально горящих пикселей
+    # Горящий пиксель НЕ должен искажать среднее и дисперсию фона вокруг себя
+    bg_mask = (i4_clean < 318.0) & (delta_t < 9.0) & (valid > 0.5)
+    bg_weight = bg_mask.astype(np.float32)
+    weight_sum = uniform_filter(bg_weight, size=21, mode='reflect') + 1e-4
+    
+    mean_i4 = uniform_filter(i4_clean * bg_weight, size=21, mode='reflect') / weight_sum
+    mean_i4_sq = uniform_filter((i4_clean**2) * bg_weight, size=21, mode='reflect') / weight_sum
     std_i4 = np.sqrt(np.maximum(mean_i4_sq - mean_i4**2, 1.0))
     z_i4 = (i4_clean - mean_i4) / (std_i4 + 1.0)
     
-    mean_dt = uniform_filter(delta_t, size=21, mode='reflect')
-    mean_dt_sq = uniform_filter(delta_t**2, size=21, mode='reflect')
+    mean_dt = uniform_filter(delta_t * bg_weight, size=21, mode='reflect') / weight_sum
+    mean_dt_sq = uniform_filter((delta_t**2) * bg_weight, size=21, mode='reflect') / weight_sum
     std_dt = np.sqrt(np.maximum(mean_dt_sq - mean_dt**2, 1.0))
     z_dt = (delta_t - mean_dt) / (std_dt + 1.0)
     
-    # 4. Локальный контраст малого окна 5x5
+    # 4. Локальный контраст малых окон 5x5 и 9x9
     mean_i4_small = uniform_filter(i4_clean, size=5, mode='reflect')
     diff_small = i4_clean - mean_i4_small
+    mean_i4_mid = uniform_filter(i4_clean, size=9, mode='reflect')
+    diff_mid = i4_clean - mean_i4_mid
     
     # 5. Дневной / ночной режим и фильтр бликов
     is_day = (solar_zenith < 85.0).astype(np.float32)
@@ -84,6 +90,9 @@ def extract_af_features(viirs_data: np.ndarray, aux_data: np.ndarray) -> np.ndar
     
     # NDVI в видимом диапазоне (днем)
     ndvi = np.where(is_day > 0.5, (i2_safe - i1_safe) / (i2_safe + i1_safe + 1e-4), 0.0)
+    
+    # Соотношение MIR / TIR
+    mir_tir_ratio = (i4_clean - 250.0) / (i5_clean - 250.0 + 1e-3)
     
     # 6. Тип покрова (индикаторы)
     is_forest = (landcover == 10).astype(np.float32)
@@ -102,6 +111,8 @@ def extract_af_features(viirs_data: np.ndarray, aux_data: np.ndarray) -> np.ndar
         z_i4.ravel(),
         z_dt.ravel(),
         diff_small.ravel(),
+        diff_mid.ravel(),
+        mir_tir_ratio.ravel(),
         glint_proxy.ravel(),
         ndvi.ravel(),
         is_day.ravel(),

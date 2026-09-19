@@ -93,7 +93,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi.staticfiles import StaticFiles
+
 app.include_router(api_router, prefix=settings.API_V1_STR)
+
+frontend_dist = os.path.abspath(os.path.join(settings.PROJECT_ROOT, "frontend", "dist"))
+assets_dir = os.path.join(frontend_dist, "assets")
+if os.path.exists(assets_dir):
+    app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
 map_html_path = os.path.join(settings.TEMPLATES_DIR, "map.html")
 
@@ -106,6 +113,10 @@ map_html_path = os.path.join(settings.TEMPLATES_DIR, "map.html")
 )
 def root_map():
     """Открывает полноэкранный картографический интерфейс с визуализацией термоточек и контуров гарей."""
+    index_html = os.path.join(frontend_dist, "index.html")
+    if os.path.exists(index_html):
+        with open(index_html, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
     if os.path.exists(map_html_path):
         with open(map_html_path, "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
@@ -121,3 +132,11 @@ def root_map():
 def get_map():
     """Прямая ссылка на картографический интерфейс."""
     return root_map()
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+def get_favicon():
+    fav = os.path.join(frontend_dist, "favicon.svg")
+    if os.path.exists(fav):
+        return FileResponse(fav, media_type="image/svg+xml")
+    return HTMLResponse(status_code=404)

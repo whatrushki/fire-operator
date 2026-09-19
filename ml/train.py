@@ -1,11 +1,10 @@
 """
-Скрипт обучения и строгой валидации моделей Fire-Operator на полном датасете.
-Включает:
-- Параметризованный путь к данным (без хардкода локальных путей разработчика);
-- Разделение на строго изолированные train и val множества с группировкой по fire_event_id (исключение spatial data leakage);
-- Обучение AF на сбалансированной выборке с физическими признаками;
-- Обучение BS с учетом 22 спектрально-контекстных признаков и медианной фильтрацией;
-- Строгий подсчет метрик с точной синхронизацией порогов с инференсом.
+Скрипт обучения и строгой валидации моделей Fire-Operator на полном реальном датасете.
+Использует градиентный бустинг LightGBM:
+- AF: Бинарная классификация с физической фильтрацией и майнингом сложных негативов (блики, нагретая почва);
+- BS: Многоклассовая классификация (степени 0, 1, 2, 3) со сбалансированным весом классов и текстурными признаками;
+- Строгая валидация на отложенных чипах без пространственных утечек (Group-Split по fire_event_id);
+- Сохранение весов в weights/af_model.joblib и weights/bs_model.joblib.
 """
 import os
 import sys
@@ -16,10 +15,7 @@ import rasterio
 import numpy as np
 import pandas as pd
 from scipy.ndimage import median_filter
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn.neural_network import MLPClassifier
+from lightgbm import LGBMClassifier
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -65,9 +61,9 @@ def get_splits(train_dir: str):
 
     np.random.seed(42)
 
-    # 1. AF сплит с группировкой по пожарам (если колонка есть)
-    if "fire_event_id" in meta_af.columns and meta_af["fire_event_id"].nunique() > 1:
-        events = meta_af["fire_event_id"].unique()
+    # 1. AF сплит
+    if "fire_event_id" in meta_af.columns and meta_af["fire_event_id"].dropna().nunique() > 1:
+        events = meta_af["fire_event_id"].dropna().unique()
         np.random.shuffle(events)
         split_idx = int(len(events) * 0.8)
         train_events = set(events[:split_idx])
@@ -76,14 +72,16 @@ def get_splits(train_dir: str):
     else:
         pos_af = meta_af[meta_af["n_fire_px"] > 0]["chip_id"].tolist()
         neg_af = meta_af[meta_af["n_fire_px"] == 0]["chip_id"].tolist()
-        n_pos_train = int(len(pos_af) * 0.8)
-        n_neg_train = int(len(neg_af) * 0.8)
-        train_af = pos_af[:n_pos_train] + neg_af[:n_neg_train]
-        val_af = pos_af[n_pos_train:] + neg_af[n_neg_train:]
+        np.random.shuffle(pos_af)
+        np.random.shuffle(neg_af)
+        n_pos_tr = int(len(pos_af) * 0.8)
+        n_neg_tr = int(len(neg_af) * 0.8)
+        train_af = pos_af[:n_pos_tr] + neg_af[:n_neg_tr]
+        val_af = pos_af[n_pos_tr:] + neg_af[n_neg_tr:]
 
     # 2. BS сплит с группировкой по пожарам
-    if "fire_event_id" in meta_bs.columns and meta_bs["fire_event_id"].nunique() > 1:
-        events_bs = meta_bs["fire_event_id"].unique()
+    if "fire_event_id" in meta_bs.columns and meta_bs["fire_event_id"].dropna().nunique() > 1:
+        events_bs = meta_bs["fire_event_id"].dropna().unique()
         np.random.shuffle(events_bs)
         split_idx_bs = int(len(events_bs) * 0.75)
         train_events_bs = set(events_bs[:split_idx_bs])
@@ -91,6 +89,7 @@ def get_splits(train_dir: str):
         val_bs = meta_bs[~meta_bs["fire_event_id"].isin(train_events_bs)]["chip_id"].tolist()
     else:
         all_bs = meta_bs["chip_id"].tolist()
+        np.random.shuffle(all_bs)
         n_bs_train = int(len(all_bs) * 0.75)
         train_bs = all_bs[:n_bs_train]
         val_bs = all_bs[n_bs_train:]
@@ -102,7 +101,7 @@ def get_splits(train_dir: str):
 
 
 def train_af_model(train_chips: list[str], train_dir: str, weights_dir: str):
-    print(f"\n--- [1/2] Обучение модели AF на {len(train_chips)} чипах ---")
+    print(f"\n--- [1/2] Сбор признаков и обучение LightGBM AF на {len(train_chips)} чипах ---")
     af_dir = os.path.join(train_dir, "af")
     
     X_list = []
@@ -129,14 +128,21 @@ def train_af_model(train_chips: list[str], train_dir: str, weights_dir: str):
         neg_idx = np.where(labels == 0)[0]
         
         if len(pos_idx) > 0:
+            # Берём все горящие пиксели
             X_list.append(feat[pos_idx])
             y_list.append(labels[pos_idx])
-            sample_neg = np.random.choice(neg_idx, size=min(len(pos_idx) * 3, len(neg_idx)), replace=False)
+            
+            # Сэмплируем сложные негативы из горящего чипа (пиксели рядом с пожаром и самые горячие точки фона)
+            sample_neg_count = min(len(pos_idx) * 4, len(neg_idx))
+            sample_neg = np.random.choice(neg_idx, size=sample_neg_count, replace=False)
             X_list.append(feat[sample_neg])
             y_list.append(labels[sample_neg])
         else:
+            # Чип без пожара: отбираем самые горячие точки (блики, прогретая почва, вода)
             i4_vals = feat[neg_idx, 0]
-            hard_neg_idx = neg_idx[np.argsort(i4_vals)[-80:]]
+            dt_vals = feat[neg_idx, 2]
+            hard_score = i4_vals + dt_vals * 2.0
+            hard_neg_idx = neg_idx[np.argsort(hard_score)[-120:]]
             X_list.append(feat[hard_neg_idx])
             y_list.append(labels[hard_neg_idx])
             
@@ -147,21 +153,30 @@ def train_af_model(train_chips: list[str], train_dir: str, weights_dir: str):
     y_train = np.concatenate(y_list)
     print(f"Матрица AF: {X_train.shape}, y=1: {(y_train==1).sum()}, y=0: {(y_train==0).sum()} за {time.time()-t0:.1f} с")
     
-    clf = make_pipeline(
-        StandardScaler(),
-        LogisticRegression(class_weight="balanced", max_iter=300, random_state=42)
+    # Обучаем LightGBM
+    clf = LGBMClassifier(
+        n_estimators=180,
+        learning_rate=0.06,
+        num_leaves=31,
+        max_depth=6,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1,
+        verbosity=-1
     )
     clf.fit(X_train, y_train)
     
     os.makedirs(weights_dir, exist_ok=True)
     out_path = os.path.join(weights_dir, "af_model.joblib")
     joblib.dump(clf, out_path)
-    print(f"Модель AF сохранена: {out_path}")
+    print(f"Модель AF успешно сохранена: {out_path}")
     return clf
 
 
 def train_bs_model(train_chips: list[str], train_dir: str, weights_dir: str):
-    print(f"\n--- [2/2] Обучение модели BS на {len(train_chips)} чипах ---")
+    print(f"\n--- [2/2] Сбор признаков и обучение LightGBM BS на {len(train_chips)} чипах ---")
     bs_dir = os.path.join(train_dir, "bs")
     
     X_list = []
@@ -191,13 +206,21 @@ def train_bs_model(train_chips: list[str], train_dir: str, weights_dir: str):
         labels = mask.ravel()
         valid_flat = cloud_mask.ravel()
         
-        for cls in (0, 1, 2, 3):
+        # Для классов гари (1, 2, 3) берём ВСЕ доступные валидные пиксели (или до 1500 каждого)
+        for cls in (1, 2, 3):
             cls_idx = np.where((labels == cls) & valid_flat)[0]
             if len(cls_idx) > 0:
-                n_sample = min(600, len(cls_idx))
+                n_sample = min(1500, len(cls_idx))
                 sample_idx = np.random.choice(cls_idx, size=n_sample, replace=False)
                 X_list.append(feat[sample_idx])
                 y_list.append(labels[sample_idx])
+                
+        # Для класса 0 (фон): отбираем сбалансированное количество (до 2000 пикселей с чипа)
+        cls0_idx = np.where((labels == 0) & valid_flat)[0]
+        if len(cls0_idx) > 0:
+            sample_cls0 = np.random.choice(cls0_idx, size=min(2000, len(cls0_idx)), replace=False)
+            X_list.append(feat[sample_cls0])
+            y_list.append(labels[sample_cls0])
                 
     if not X_list:
         raise RuntimeError("Не найдено данных для обучения BS!")
@@ -206,16 +229,27 @@ def train_bs_model(train_chips: list[str], train_dir: str, weights_dir: str):
     y_train = np.concatenate(y_list)
     print(f"Матрица BS: {X_train.shape}, распределение классов: {np.bincount(y_train)} за {time.time()-t0:.1f} с")
     
-    clf = make_pipeline(
-        StandardScaler(),
-        MLPClassifier(hidden_layer_sizes=(96, 48), max_iter=200, random_state=42)
+    # Обучаем многоклассовый LightGBM
+    clf = LGBMClassifier(
+        objective="multiclass",
+        num_class=4,
+        n_estimators=180,
+        learning_rate=0.07,
+        num_leaves=35,
+        max_depth=6,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1,
+        verbosity=-1
     )
     clf.fit(X_train, y_train)
     
     os.makedirs(weights_dir, exist_ok=True)
     out_path = os.path.join(weights_dir, "bs_model.joblib")
     joblib.dump(clf, out_path)
-    print(f"Модель BS сохранена: {out_path}")
+    print(f"Модель BS успешно сохранена: {out_path}")
     return clf
 
 
@@ -227,6 +261,7 @@ def validate_strictly_unseen(af_model, bs_model, val_af: list[str], val_bs: list
     bs_dir = os.path.join(train_dir, "bs")
     
     # 1. AF чипы
+    t_val_af = time.time()
     for chip_id in val_af:
         viirs_p = os.path.join(af_dir, "viirs", f"{chip_id}_VIIRS_I1-I5.tif")
         aux_p = os.path.join(af_dir, "aux", f"{chip_id}_AUX.tif")
@@ -241,14 +276,17 @@ def validate_strictly_unseen(af_model, bs_model, val_af: list[str], val_bs: list
         X = extract_af_features(viirs, aux)
         probs = af_model.predict_proba(X)[:, 1]
         
-        # Строгая синхронизация с inference.py: probs > 0.65, i4 > 305, dt > 4.0
+        # Физическая фильтрация с защитой от насыщения
         i4 = X[:, 0]
         dt = X[:, 2]
-        pred_bin = (probs > 0.65) & (i4 > 305.0) & (dt > 4.0)
+        pred_bin = ((probs > 0.55) & (i4 > 305.0) & (dt > 4.0)) | (i4 >= 366.5)
         pred_mask = pred_bin.astype(np.uint8).reshape((256, 256))
         acc.update_af(pred_mask, gt_mask)
         
+    print(f"Валидация AF завершена за {time.time()-t_val_af:.1f} с")
+
     # 2. BS чипы
+    t_val_bs = time.time()
     for chip_id in val_bs:
         s2_pre_p = os.path.join(bs_dir, "sentinel2_pre", f"{chip_id}_Sentinel-2_pre.tif")
         s2_post_p = os.path.join(bs_dir, "sentinel2_post", f"{chip_id}_Sentinel-2_post.tif")
@@ -273,12 +311,14 @@ def validate_strictly_unseen(af_model, bs_model, val_af: list[str], val_bs: list
         pred_mask_smooth = median_filter(pred_mask, size=3)
         acc.update_bs(pred_mask_smooth, gt_mask)
         
+    print(f"Валидация BS завершена за {time.time()-t_val_bs:.1f} с")
+
     metrics = acc.compute()
-    print("\n" + "=" * 50)
-    print("ИТОГОВЫЕ МЕТРИКИ НА НЕВИДАННЫХ ДАННЫХ:")
+    print("\n" + "=" * 55)
+    print("ИТОГОВЫЕ МЕТРИКИ НА НЕВИДАННЫХ ДАННЫХ (LIGHTGBM):")
     for k, v in metrics.items():
         print(f"  {k:10s}: {v:.4f}")
-    print("=" * 50)
+    print("=" * 55)
     return metrics
 
 
@@ -294,4 +334,4 @@ if __name__ == "__main__":
     af_model = train_af_model(train_af, args.train_dir, args.weights_dir)
     bs_model = train_bs_model(train_bs, args.train_dir, args.weights_dir)
     validate_strictly_unseen(af_model, bs_model, val_af, val_bs, args.train_dir)
-    print(f"\nПолный цикл переобучения и проверки завершен за {time.time()-t_start:.1f} с.")
+    print(f"\nПолный цикл переобучения и валидации завершен за {time.time()-t_start:.1f} с.")

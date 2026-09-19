@@ -1,28 +1,30 @@
 import os
 import sys
 import numpy as np
-from sklearn.neural_network import MLPClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import make_pipeline
+import joblib
 
-X = np.random.randn(1000, 20).astype(np.float32)
-y_bin = (X[:, 0] + X[:, 1] > 0).astype(np.int32)
-y_multi = np.random.randint(0, 4, size=1000)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-# Test binary
-clf_af = make_pipeline(StandardScaler(), LogisticRegression(class_weight='balanced'))
-clf_af.fit(X, y_bin)
-p_bin = clf_af.predict(X)
-print("Binary LogisticRegression: OK, accuracy=", np.mean(p_bin == y_bin))
+def test_models_load_and_predict():
+    af_path = os.path.join(PROJECT_ROOT, "weights", "af_model.joblib")
+    bs_path = os.path.join(PROJECT_ROOT, "weights", "bs_model.joblib")
+    
+    assert os.path.exists(af_path), f"Missing {af_path}"
+    assert os.path.exists(bs_path), f"Missing {bs_path}"
+    
+    af_model = joblib.load(af_path)
+    bs_model = joblib.load(bs_path)
+    
+    # AF model takes 24 features
+    X_af_dummy = np.zeros((10, 24), dtype=np.float32)
+    p_af = af_model.predict_proba(X_af_dummy)
+    assert p_af.shape == (10, 2), f"Unexpected AF shape: {p_af.shape}"
+    
+    # BS model takes 26 features
+    X_bs_dummy = np.zeros((10, 26), dtype=np.float32)
+    p_bs = bs_model.predict(X_bs_dummy)
+    assert p_bs.shape == (10,), f"Unexpected BS shape: {p_bs.shape}"
+    print("Trained LightGBM models loaded and verified successfully!")
 
-# Test multi
-clf_bs = make_pipeline(StandardScaler(), LogisticRegression(max_iter=200))
-clf_bs.fit(X, y_multi)
-p_multi = clf_bs.predict(X)
-print("Multiclass LogisticRegression: OK, accuracy=", np.mean(p_multi == y_multi))
-
-# Test MLP
-mlp_af = make_pipeline(StandardScaler(), MLPClassifier(hidden_layer_sizes=(64, 32), max_iter=50, random_state=42))
-mlp_af.fit(X, y_bin)
-print("MLPClassifier: OK")
+if __name__ == "__main__":
+    test_models_load_and_predict()

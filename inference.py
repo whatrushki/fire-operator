@@ -50,10 +50,10 @@ def _process_single_af(item):
         X = extract_af_features(viirs, aux)
         probs = _WORKER_AF_MODEL.predict_proba(X)[:, 1]
         
-        # Физическая фильтрация с учетом порога насыщения I4 (367 K)
+        # Физическая фильтрация с защитой от насыщения
         i4 = X[:, 0]
         dt = X[:, 2]
-        pred_bin = ((probs > 0.65) & (i4 > 305.0) & (dt > 4.0)) | (i4 >= 366.5)
+        pred_bin = ((probs > 0.55) & (i4 > 305.0) & (dt > 4.0)) | (i4 >= 366.5)
         mask = pred_bin.astype(np.uint8).reshape((256, 256))
         return chip_id, 1, rle_encode(mask)
     except Exception as e:
@@ -74,8 +74,16 @@ def _process_single_bs(item):
         with rasterio.open(files["aux"]) as s: aux = s.read()
         
         X, cloud_mask = extract_bs_features(s2_pre, s2_post, s1_pre, s1_post, aux)
-        preds = _WORKER_BS_MODEL.predict(X)
-        pred_mask = preds.reshape((512, 512)).astype(np.uint8)
+        dnbr = X[:, 0]
+        dndvi = X[:, 2]
+        
+        # Быстрый предфильтр фона: если dNBR и dNDVI отрицательные или околонулевые, это гарантированно фон (класс 0)
+        cand_idx = np.where((dnbr > 0.02) | (dndvi > 0.03))[0]
+        preds = np.zeros(len(X), dtype=np.uint8)
+        if len(cand_idx) > 0:
+            preds[cand_idx] = _WORKER_BS_MODEL.predict(X[cand_idx])
+            
+        pred_mask = preds.reshape((512, 512))
         pred_mask[~cloud_mask] = 0
         pred_mask = median_filter(pred_mask, size=3)
         
@@ -114,52 +122,50 @@ def load_models():
 def find_chip_files(data_dir: str):
     """
     Рекурсивный и регистронезависимый поиск файлов чипов в каталоге данных.
-    Поддерживает как плоскую, так и иерархическую структуру папок.
+    Поддерживает как плоскую, так и иерархическую структуру папок (включая sentinel2_pre/BS_...tif).
     """
     af_chips = {}
     bs_chips = {}
 
     for root, _, files in os.walk(data_dir):
         for f in files:
-            f_lower = f.lower()
-            if not (f_lower.endswith(".tif") or f_lower.endswith(".tiff")):
+            fl = f.lower()
+            if not (fl.endswith(".tif") or fl.endswith(".tiff")):
                 continue
             fpath = os.path.join(root, f)
+            pl = fpath.replace("\\", "/").lower()
 
             # 1. AF чипы
-            if f.startswith("AF_") or f_lower.startswith("af_"):
-                m = re.match(r"^([a-zA-Z0-9_]+?)_(viirs|aux)", f, re.IGNORECASE)
-                chip_id = m.group(1) if m else f.split(".")[0].split("_VIIRS")[0].split("_AUX")[0]
+            if "/af/" in pl or f.startswith("AF_") or fl.startswith("af_"):
+                m = re.search(r"(AF_[a-zA-Z0-9_]+?)(?:_VIIRS|_AUX|_images|\.tif)", f, re.IGNORECASE)
+                cid = m.group(1) if m else f.split(".")[0].split("_VIIRS")[0].split("_AUX")[0]
                 
-                if "viirs" in f_lower:
-                    af_chips.setdefault(chip_id, {})["viirs"] = fpath
-                elif "aux" in f_lower:
-                    af_chips.setdefault(chip_id, {})["aux"] = fpath
+                if "viirs" in fl or "/viirs/" in pl:
+                    af_chips.setdefault(cid, {})["viirs"] = fpath
+                elif "aux" in fl or "/aux/" in pl:
+                    af_chips.setdefault(cid, {})["aux"] = fpath
 
             # 2. BS чипы
-            elif f.startswith("BS_") or f_lower.startswith("bs_"):
-                m = re.match(
-                    r"^([a-zA-Z0-9_]+?)_(sentinel-2_pre|sentinel-2_post|sentinel-1_pre|sentinel-1_post|s2_pre|s2_post|s1_pre|s1_post|aux)",
-                    f, re.IGNORECASE
-                )
-                chip_id = m.group(1) if m else f.split(".")[0]
+            elif "/bs/" in pl or f.startswith("BS_") or fl.startswith("bs_"):
+                m = re.search(r"(BS_[a-zA-Z0-9_]+?)(?:_Sentinel-2|_Sentinel-1|_AUX|_s2|_s1|\.tif)", f, re.IGNORECASE)
+                cid = m.group(1) if m else f.split(".")[0]
                 for prefix in [
                     "_sentinel-2_pre", "_sentinel-2_post", "_sentinel-1_pre", "_sentinel-1_post",
                     "_s2_pre", "_s2_post", "_s1_pre", "_s1_post", "_aux"
                 ]:
-                    if prefix in chip_id.lower():
-                        chip_id = chip_id[:chip_id.lower().find(prefix)]
+                    if prefix in cid.lower():
+                        cid = cid[:cid.lower().find(prefix)]
 
-                if "sentinel-2_pre" in f_lower or "s2_pre" in f_lower:
-                    bs_chips.setdefault(chip_id, {})["s2_pre"] = fpath
-                elif "sentinel-2_post" in f_lower or "s2_post" in f_lower:
-                    bs_chips.setdefault(chip_id, {})["s2_post"] = fpath
-                elif "sentinel-1_pre" in f_lower or "s1_pre" in f_lower:
-                    bs_chips.setdefault(chip_id, {})["s1_pre"] = fpath
-                elif "sentinel-1_post" in f_lower or "s1_post" in f_lower:
-                    bs_chips.setdefault(chip_id, {})["s1_post"] = fpath
-                elif "aux" in f_lower:
-                    bs_chips.setdefault(chip_id, {})["aux"] = fpath
+                if "sentinel-2_pre" in fl or "sentinel2_pre" in pl or "s2_pre" in fl or "/pre/" in pl:
+                    bs_chips.setdefault(cid, {})["s2_pre"] = fpath
+                elif "sentinel-2_post" in fl or "sentinel2_post" in pl or "s2_post" in fl or "/post/" in pl:
+                    bs_chips.setdefault(cid, {})["s2_post"] = fpath
+                elif "sentinel-1_pre" in fl or "sentinel1_pre" in pl or "s1_pre" in fl or "sar_pre" in pl:
+                    bs_chips.setdefault(cid, {})["s1_pre"] = fpath
+                elif "sentinel-1_post" in fl or "sentinel1_post" in pl or "s1_post" in fl or "sar_post" in pl:
+                    bs_chips.setdefault(cid, {})["s1_post"] = fpath
+                elif "_aux" in fl or "/aux/" in pl:
+                    bs_chips.setdefault(cid, {})["aux"] = fpath
 
     return af_chips, bs_chips
 

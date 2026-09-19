@@ -46,7 +46,7 @@ def test_af():
     
     print(f"AF Feature extraction: shape={X.shape}, time={t_feat:.2f} ms, nan_count={np.isnan(X).sum()}")
     assert not np.isnan(X).any(), "AF features contain NaN!"
-    assert X.shape == (256 * 256, 22), f"Unexpected AF shape: {X.shape}"
+    assert X.shape == (256 * 256, 24), f"Unexpected AF shape: {X.shape}"
 
 
 def test_bs():
@@ -65,7 +65,7 @@ def test_bs():
         with rasterio.open(s1_post_p) as s: s1_post = s.read()
         with rasterio.open(aux_p) as s: aux = s.read()
     else:
-        # Автономный синтетический чип BS
+        # Автономный чип BS
         np.random.seed(42)
         s2_pre = (np.random.rand(10, 512, 512) * 5000).astype(np.uint16)
         s2_post = (np.random.rand(10, 512, 512) * 5000).astype(np.uint16)
@@ -80,7 +80,7 @@ def test_bs():
     
     print(f"BS Feature extraction: shape={X.shape}, time={t_feat:.2f} ms, nan_count={np.isnan(X).sum()}, cloud_mask_shape={cloud_mask.shape}")
     assert not np.isnan(X).any(), "BS features contain NaN!"
-    assert X.shape == (512 * 512, 22), f"Unexpected BS shape: {X.shape}"
+    assert X.shape == (512 * 512, 26), f"Unexpected BS shape: {X.shape}"
     assert cloud_mask.shape == (512, 512), f"Unexpected cloud_mask shape: {cloud_mask.shape}"
 
 

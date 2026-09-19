@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-canvas: #07080A;
+    --bg-panel: #0E1013;
+    --bg-card: #15171C;
+    --bg-card-hover: #1D1F26;
+  }
+
+  body {
+    margin: 0;
+    padding: 0;
+    background-color: #07080A;
+    color: #FFFFFF;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  #root {
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    position: relative;
+    background-color: #07080A;
+  }
+}
+
+@import "maplibre-gl/dist/maplibre-gl.css";
+
+/* Clean natural satellite tiles - NO dark filter! Crisp high-res imagery */
+.maplibregl-canvas {
+  outline: none;
+}
+
+/* Hide MapLibre attribution badge and logo */
+.maplibregl-ctrl-attrib,
+.maplibregl-ctrl-logo,
+.maplibregl-compact {
+  display: none !important;
+}
+
+/* Print Styles for Executive PDF Report */
+@media print {
+  body {
+    background-color: #FFFFFF !important;
+    color: #000000 !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  @page {
+    size: A4 portrait;
+    margin: 15mm;
+  }
+}
+
+.cockpit-panel {
+  background: rgba(14, 16, 20, 0.92);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+/* Subtle Card Glows */
+.card-glow-fire {
+  position: relative;
+  background: radial-gradient(80% 50% at 50% 0%, rgba(239, 68, 68, 0.14) 0%, transparent 100%), #15171C;
+}
+
+.card-glow-subtle {
+  position: relative;
+  background: radial-gradient(80% 50% at 50% 0%, rgba(255, 255, 255, 0.08) 0%, transparent 100%), #15171C;
+}
+
+/* Custom Scrollbar for Cockpit */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}

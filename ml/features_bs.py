@@ -71,10 +71,23 @@ def extract_bs_features(
     d_vv = vv_post - vv_pre
     diff_vh_vv = d_vh - d_vv
     
+    # Дополнительные спектральные каналы:
+    post_b5 = s2_post[3].astype(np.float32) / 10000.0  # Red Edge 1
+    pre_b3 = s2_pre[1].astype(np.float32) / 10000.0    # Green
+    pre_b2 = s2_pre[0].astype(np.float32) / 10000.0    # Blue
+    
+    # Спектральные дельты
+    d_green = post_b3 - pre_b3
+    d_blue = post_b2 - pre_b2
+    ndre_post = (post_b8a - post_b5) / (post_b8a + post_b5 + 1e-5)
+    
     # 5. Пространственно-контекстные признаки (скользящие окна 3x3 и 5x5)
     # Позволяют классификатору учитывать связность контура гари и устраняют шум одиночных пикселей
     dnbr_mean3 = uniform_filter(dnbr, size=3, mode='reflect')
     dnbr_mean5 = uniform_filter(dnbr, size=5, mode='reflect')
+    dnbr_sq3 = uniform_filter(dnbr**2, size=3, mode='reflect')
+    dnbr_std3 = np.sqrt(np.maximum(dnbr_sq3 - dnbr_mean3**2, 1e-5))
+    
     dndvi_mean3 = uniform_filter(dndvi, size=3, mode='reflect')
     dred_mean3 = uniform_filter(d_red, size=3, mode='reflect')
     dvh_mean3 = uniform_filter(d_vh, size=3, mode='reflect')
@@ -89,6 +102,7 @@ def extract_bs_features(
     is_grass = (landcover == 30).astype(np.float32)
     is_crop = (landcover == 40).astype(np.float32)
     is_water = (landcover == 80).astype(np.float32)
+    is_wetland = (landcover == 90).astype(np.float32)
     
     # 7. Маска облачности и теней по SCL: 3=тень, 8,9,10=облака
     # Защита светлых почв: облако маркируется, только если синий канал post_b2 > 0.15
@@ -96,13 +110,16 @@ def extract_bs_features(
     cloud_post = np.isin(post_scl, [3, 8, 9, 10]) & (post_b2 > 0.15)
     cloud_mask = ~(cloud_pre | cloud_post)
     
-    # 8. Формирование матрицы признаков (22 признака)
+    # 8. Формирование матрицы признаков (26 признаков)
     features = [
         dnbr.ravel(),
         rdnbr.ravel(),
         dndvi.ravel(),
         d_red.ravel(),
         d_swir.ravel(),
+        d_green.ravel(),
+        d_blue.ravel(),
+        ndre_post.ravel(),
         nbr_post.ravel(),
         post_b8a.ravel(),
         post_b12.ravel(),
@@ -111,6 +128,7 @@ def extract_bs_features(
         diff_vh_vv.ravel(),
         dnbr_mean3.ravel(),
         dnbr_mean5.ravel(),
+        dnbr_std3.ravel(),
         dndvi_mean3.ravel(),
         dred_mean3.ravel(),
         dvh_mean3.ravel(),

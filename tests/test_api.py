@@ -88,8 +88,40 @@ def test_analyze_and_report_cycle():
     print("Machine-readable JSON report export PASS!")
 
 
+def test_preset_analysis():
+    resp = client.post("/api/v1/analyze", json={
+        "region": "volgograd",
+        "date_from": "2024-05-01",
+        "date_to": "2024-09-30",
+        "include_radar": True
+    })
+    assert resp.status_code == 202
+    tid = resp.json()["task_id"]
+    time.sleep(1.0)
+    rep = client.get(f"/api/v1/report/{tid}").json()
+    assert rep["total_burned_area_ha"] > 0
+    assert rep["active_thermal_anomalies_count"] > 0
+
+
+def test_zero_coverage_analysis():
+    resp = client.post("/api/v1/analyze", json={
+        "bbox": [-160.0, -20.0, -159.0, -19.0],
+        "date_from": "2024-01-01",
+        "date_to": "2024-02-01",
+        "include_radar": True
+    })
+    assert resp.status_code == 202
+    tid = resp.json()["task_id"]
+    time.sleep(1.0)
+    rep = client.get(f"/api/v1/report/{tid}").json()
+    assert rep["total_burned_area_ha"] == 0.0
+    assert rep["active_thermal_anomalies_count"] == 0
+
+
 if __name__ == "__main__":
     test_map_page()
     test_health()
     test_analyze_and_report_cycle()
+    test_preset_analysis()
+    test_zero_coverage_analysis()
     print("\nALL BACKEND API TESTS PASSED!")
