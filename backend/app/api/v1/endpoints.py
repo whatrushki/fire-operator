@@ -13,8 +13,8 @@ from rasterio.transform import from_bounds
 from fastapi import APIRouter, HTTPException, BackgroundTasks, status
 from fastapi.responses import FileResponse, JSONResponse
 import pyproj
-import joblib
 from scipy.ndimage import median_filter, label
+from typing import Any, Optional, Dict, List
 
 
 def _remove_small_components(binary_mask: np.ndarray, min_size: int = 25) -> np.ndarray:
