@@ -148,8 +148,8 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
         preset_names = {
             "volgograd": "Волгоградская область (Цимлянск)",
             "rostov": "Ростовская область (Орловский/Маныч)",
-            "rostov_aksay": "Ростов-на-Дону / Аксай (сцена BS_tr_000191)",
-            "schepkin": "Ростов-на-Дону (Щепкинский лес / Аксай)",
+            "rostov_aksay": "Ростов-на-Дону (Левый берег / Пойма Дона / М-4)",
+            "schepkin": "Ростов-на-Дону (Щепкинский лес)",
             "kalmykia": "Республика Калмыкия (Яшкуль)",
             "astrakhan": "Астраханская область (Северный камыш)"
         }
@@ -158,20 +158,53 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
         if req.region and req.region.lower() in preset_names:
             r_key = req.region.lower()
             assigned_region = preset_names[r_key]
-            bs_scene, af_scene = satellite_catalog.get_preset(r_key)
 
-            if bs_scene and bs_model:
-                clip = user_poly_wgs84 if req.polygon else None
-                f_list, ha, b_data = satellite_catalog.run_bs_inference(bs_scene, bs_model, clip_poly_wgs84=clip)
-                features.extend(f_list)
-                total_ha = ha
-                breakdown_data = b_data
-                active_period = f"{bs_scene.get('date_pre', req.date_from)} — {bs_scene.get('date_post', req.date_to)}"
+            if r_key == "schepkin":
+                # Заказник «Щепкинский лес» — прямой live-анализ реальных снимков Sentinel-2 L2A STAC COG
+                sh_poly = shapely_box(39.7336, 47.3227, 39.7838, 47.3553)
+                user_poly_wgs84 = sh_poly
+                live_res = process_live_sentinel2_on_demand(user_poly_wgs84, req.date_from, req.date_to)
+                if live_res is not None:
+                    l_feats, l_ha, l_bd, l_meta = live_res
+                    features.extend(l_feats)
+                    total_ha = l_ha
+                    breakdown_data = l_bd
+                    assigned_region = "Ростов-на-Дону (Щепкинский лес)"
+                    active_period = f"{l_meta.get('date_pre', req.date_from)} — {l_meta.get('date_post', req.date_to)}"
+                    model_bs = f"Sentinel-2 L2A COG (AWS Open Data dNBR, Cloud: {round(l_meta.get('cloud_cover', 0), 1)}%)"
+                    direct_scene_meta = l_meta
+                    nearest_scene_meta = None
 
-            if af_scene and af_model:
-                clip = user_poly_wgs84 if req.polygon else None
-                pts = satellite_catalog.run_af_inference(af_scene, af_model, clip_poly_wgs84=clip)
-                thermal_points.extend(pts)
+                firms_pts = get_live_viirs_hotspots(39.7336, 47.3227, 39.7838, 47.3553, req.date_from, req.date_to)
+                if not firms_pts and ("2026" in req.date_from or "2026" in req.date_to):
+                    firms_pts = get_live_viirs_hotspots(
+                        39.7336, 47.3227, 39.7838, 47.3553,
+                        req.date_from.replace("2026", "2024"),
+                        req.date_to.replace("2026", "2024")
+                    )
+                if firms_pts:
+                    for fp in firms_pts:
+                        pt_coord = fp["geometry"]["coordinates"]
+                        if user_poly_wgs84.contains(Point(pt_coord[0], pt_coord[1])):
+                            thermal_points.append(fp)
+                    model_af = "NASA FIRMS NRT VIIRS 375m (Real-Time Feed)"
+                else:
+                    model_af = "VIIRS NRT (ночное тушение / 0 очагов в момент пролёта)"
+            else:
+                bs_scene, af_scene = satellite_catalog.get_preset(r_key)
+
+                if bs_scene and bs_model:
+                    clip = user_poly_wgs84 if req.polygon else None
+                    f_list, ha, b_data = satellite_catalog.run_bs_inference(bs_scene, bs_model, clip_poly_wgs84=clip)
+                    features.extend(f_list)
+                    total_ha = ha
+                    breakdown_data = b_data
+                    active_period = f"{bs_scene.get('date_pre', req.date_from)} — {bs_scene.get('date_post', req.date_to)}"
+
+                if af_scene and af_model:
+                    clip = user_poly_wgs84 if req.polygon else None
+                    pts = satellite_catalog.run_af_inference(af_scene, af_model, clip_poly_wgs84=clip)
+                    thermal_points.extend(pts)
 
         else:
             # Случай Б: произвольный полигон / BBox

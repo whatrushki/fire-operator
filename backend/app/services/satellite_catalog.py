@@ -310,7 +310,7 @@ class SatelliteCatalog:
         """Получение пары чипов (BS, AF) для одного из целевых регионов."""
         self.initialize()
         r_low = region_key.lower()
-        if r_low in ["rostov_forest", "rostov_aksay", "schepkin"]:
+        if r_low in ["rostov_forest", "rostov_aksay"]:
             scene_191 = next((s for s in self.bs_scenes if s["chip_id"] == "BS_tr_000191"), None)
             af_scene = self.preset_scenes.get("af_rostov")
             return scene_191, af_scene

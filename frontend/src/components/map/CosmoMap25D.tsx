@@ -243,7 +243,16 @@ export const CosmoMap25D: React.FC<CosmoMap25DProps> = ({
         : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 
     const labelsData = [...REGIONAL_LABELS];
-    if (selectedZone) {
+    if (drawnPoints && drawnPoints.length >= 3) {
+      const avgLng = drawnPoints.reduce((acc, p) => acc + p[0], 0) / drawnPoints.length;
+      const avgLat = drawnPoints.reduce((acc, p) => acc + p[1], 0) / drawnPoints.length;
+      labelsData.push({
+        name: `★ Пользовательский полигон (${calculatedAreaHa.toFixed(1)} га)`,
+        coordinates: [avgLng, avgLat],
+        type: 'active',
+        description: 'Выбранная пользователем зона мониторинга',
+      });
+    } else if (selectedZone) {
       labelsData.push({
         name: `★ ${selectedZone.name}`,
         coordinates: selectedZone.center,
@@ -357,7 +366,16 @@ export const CosmoMap25D: React.FC<CosmoMap25DProps> = ({
 
     // 2. REGION & CITY TEXT LABELS LAYER
     const labelsData = [...REGIONAL_LABELS];
-    if (selectedZone) {
+    if (drawnPoints && drawnPoints.length >= 3) {
+      const avgLng = drawnPoints.reduce((acc, p) => acc + p[0], 0) / drawnPoints.length;
+      const avgLat = drawnPoints.reduce((acc, p) => acc + p[1], 0) / drawnPoints.length;
+      labelsData.push({
+        name: `★ Пользовательский полигон (${calculatedAreaHa.toFixed(1)} га)`,
+        coordinates: [avgLng, avgLat],
+        type: 'active',
+        description: 'Выбранная пользователем зона мониторинга',
+      });
+    } else if (selectedZone) {
       labelsData.push({
         name: `★ ${selectedZone.name}`,
         coordinates: selectedZone.center,

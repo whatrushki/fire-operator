@@ -141,10 +141,10 @@ def process_live_sentinel2_on_demand(
             query_date_from = date_from.replace("2026", "2024")
             query_date_to = date_to.replace("2026", "2024")
 
-        # Расширяем диапазон на 5 дней для гарантированного нахождения безоблачных пролётов
+        # Расширяем поисковый диапазон для гарантированного нахождения безоблачных пролётов до и после
         try:
-            d_from_dt = datetime.strptime(query_date_from, "%Y-%m-%d") - timedelta(days=5)
-            d_to_dt = datetime.strptime(query_date_to, "%Y-%m-%d") + timedelta(days=5)
+            d_from_dt = datetime.strptime(query_date_from, "%Y-%m-%d") - timedelta(days=7)
+            d_to_dt = datetime.strptime(query_date_to, "%Y-%m-%d") + timedelta(days=7)
             search_from_str = d_from_dt.strftime("%Y-%m-%d")
             search_to_str = d_to_dt.strftime("%Y-%m-%d")
         except Exception:
@@ -156,41 +156,68 @@ def process_live_sentinel2_on_demand(
             "collections": ["sentinel-2-l2a"],
             "bbox": [round(min_lon, 4), round(min_lat, 4), round(max_lon, 4), round(max_lat, 4)],
             "datetime": f"{search_from_str}T00:00:00Z/{search_to_str}T23:59:59Z",
-            "limit": 20
+            "limit": 30
         }
         req = urllib.request.Request(
             url,
             data=json.dumps(query).encode(),
             headers={"Content-Type": "application/json", "User-Agent": "FireOperator/1.0"}
         )
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=12) as r:
             stac_res = json.loads(r.read().decode())
 
         scenes = stac_res.get("features", [])
         if not scenes:
             return None
 
-        # Фильтруем сцены с облачностью < max_cloud_cover
+        # Фильтруем сцены с облачностью <= max_cloud_cover
         clear_scenes = [
             s for s in scenes 
             if s.get("properties", {}).get("eo:cloud_cover", 100) <= max_cloud_cover
         ]
         if not clear_scenes:
-            clear_scenes = sorted(scenes, key=lambda s: s.get("properties", {}).get("eo:cloud_cover", 100))[:2]
+            clear_scenes = sorted(scenes, key=lambda s: s.get("properties", {}).get("eo:cloud_cover", 100))[:3]
 
-        # Выбираем post_scene (самая поздняя чистая сцена в периоде)
         clear_scenes.sort(key=lambda s: s.get("properties", {}).get("datetime", ""))
-        post_scene = clear_scenes[-1]
+        if len(clear_scenes) < 2:
+            extra = [s for s in scenes if s["id"] not in [cs["id"] for cs in clear_scenes]]
+            if extra:
+                extra.sort(key=lambda s: s.get("properties", {}).get("eo:cloud_cover", 100))
+                clear_scenes.append(extra[0])
+                clear_scenes.sort(key=lambda s: s.get("properties", {}).get("datetime", ""))
 
-        # Ищем pre_scene: ближайшую чистую сцену, строго предшествующую post_scene
-        pre_candidates = [
+        target_from = datetime.strptime(query_date_from, "%Y-%m-%d")
+        target_to = datetime.strptime(query_date_to, "%Y-%m-%d")
+        mid_date = target_from + (target_to - target_from) / 2
+
+        # Pre-scene: ближайшая чистая сцена к началу периода (в первой половине интервала)
+        pre_pool = [
             s for s in clear_scenes 
-            if s.get("properties", {}).get("datetime", "") < post_scene.get("properties", {}).get("datetime", "")
+            if datetime.strptime(s.get("properties", {}).get("datetime", "")[:10], "%Y-%m-%d") <= mid_date
         ]
-        if pre_candidates:
-            pre_scene = pre_candidates[-1]
-        else:
+        if not pre_pool:
             pre_scene = clear_scenes[0]
+        else:
+            pre_scene = min(
+                pre_pool,
+                key=lambda s: abs((datetime.strptime(s.get("properties", {}).get("datetime", "")[:10], "%Y-%m-%d") - target_from).total_seconds())
+            )
+
+        # Post-scene: ближайшая чистая сцена к концу периода, строго позже pre_scene
+        post_pool = [
+            s for s in clear_scenes 
+            if s.get("properties", {}).get("datetime", "")[:10] > pre_scene.get("properties", {}).get("datetime", "")[:10]
+        ]
+        if not post_pool:
+            post_scene = clear_scenes[-1]
+        else:
+            post_scene = min(
+                post_pool,
+                key=lambda s: abs((datetime.strptime(s.get("properties", {}).get("datetime", "")[:10], "%Y-%m-%d") - target_to).total_seconds())
+            )
+
+        if pre_scene.get("id") == post_scene.get("id"):
+            return None
 
         post_assets = post_scene.get("assets", {})
         pre_assets = pre_scene.get("assets", {})
@@ -205,25 +232,27 @@ def process_live_sentinel2_on_demand(
 
         # 2. Читаем окна растров через HTTP byte-range
         with rasterio.open(post_b08) as src:
-            win = from_bounds(min_x, min_y, max_x, max_y, src.transform)
-            data_post_b08 = src.read(1, window=win).astype(float)
-            win_transform = rasterio.windows.transform(win, src.transform)
+            win_post = from_bounds(min_x, min_y, max_x, max_y, src.transform)
+            data_post_b08 = src.read(1, window=win_post).astype(float)
+            win_transform = rasterio.windows.transform(win_post, src.transform)
 
         with rasterio.open(post_b12) as src:
-            win12 = from_bounds(min_x, min_y, max_x, max_y, src.transform)
-            data_post_b12 = src.read(1, window=win12).astype(float)
+            win_post12 = from_bounds(min_x, min_y, max_x, max_y, src.transform)
+            data_post_b12 = src.read(1, window=win_post12).astype(float)
 
         with rasterio.open(pre_b08) as src:
-            data_pre_b08 = src.read(1, window=win).astype(float)
+            win_pre = from_bounds(min_x, min_y, max_x, max_y, src.transform)
+            data_pre_b08 = src.read(1, window=win_pre).astype(float)
 
         with rasterio.open(pre_b12) as src:
-            data_pre_b12 = src.read(1, window=win12).astype(float)
+            win_pre12 = from_bounds(min_x, min_y, max_x, max_y, src.transform)
+            data_pre_b12 = src.read(1, window=win_pre12).astype(float)
 
-        # Выравниваем размеры (SWIR 20м -> NIR 10м)
-        if data_pre_b12.shape != data_post_b08.shape:
-            data_pre_b12 = zoom(data_pre_b12, (data_post_b08.shape[0] / data_pre_b12.shape[0], data_post_b08.shape[1] / data_pre_b12.shape[1]), order=1)
+        # Выравниваем размеры (SWIR 20м -> NIR 10м и межсценовые отличия сетки)
         if data_post_b12.shape != data_post_b08.shape:
             data_post_b12 = zoom(data_post_b12, (data_post_b08.shape[0] / data_post_b12.shape[0], data_post_b08.shape[1] / data_post_b12.shape[1]), order=1)
+        if data_pre_b12.shape != data_post_b08.shape:
+            data_pre_b12 = zoom(data_pre_b12, (data_post_b08.shape[0] / data_pre_b12.shape[0], data_post_b08.shape[1] / data_pre_b12.shape[1]), order=1)
         if data_pre_b08.shape != data_post_b08.shape:
             data_pre_b08 = zoom(data_pre_b08, (data_post_b08.shape[0] / data_pre_b08.shape[0], data_post_b08.shape[1] / data_pre_b08.shape[1]), order=1)
 
@@ -262,7 +291,7 @@ def process_live_sentinel2_on_demand(
         idx = 0
         for geom_dict, val in rasterio.features.shapes(sev_mask, mask=(sev_mask > 0), transform=win_transform):
             geom_utm = shape(geom_dict)
-            if geom_utm.area < 1000:  # Пропуск шумов менее 0.1 га (10 пикселей)
+            if geom_utm.area < 500:  # Пропуск шумов менее 0.05 га (5 пикселей)
                 continue
             geom_wgs = transform(tr_to_wgs, geom_utm)
             if not user_poly_wgs84.intersects(geom_wgs):
