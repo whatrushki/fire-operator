@@ -451,6 +451,16 @@ def analyze_area(request: SpatialTemporalRequest, background_tasks: BackgroundTa
                 detail="Полигон территории должен содержать как минимум 3 вершины."
             )
 
+    # 4. Проверка доступности спутникового онлайн-режима
+    raw_source = (request.data_source or getattr(settings, "DATA_SOURCE_MODE", "offline")).lower().strip()
+    if raw_source == "online":
+        sat_provider = get_satellite_provider("online")
+        if not sat_provider.check_reachability():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Спутниковый онлайн-режим недоступен: отсутствует подключение к сети Интернет или спутниковым сервисам NASA/Copernicus."
+            )
+
     task_id = f"tsk_{uuid.uuid4().hex[:8]}"
     init_record = {
         "task_id": task_id,

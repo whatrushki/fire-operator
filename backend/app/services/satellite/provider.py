@@ -5,6 +5,7 @@
 (NASA FIRMS + Copernicus CDSE) с автоматическим fallback.
 """
 
+import socket
 import logging
 from enum import Enum
 from datetime import date
@@ -17,6 +18,27 @@ from app.services.satellite.cdse_auth import CDSEAuthManager
 from app.services.satellite.cdse_client import CDSEClient
 
 logger = logging.getLogger(__name__)
+
+
+def check_internet_reachability(timeout_sec: float = 1.5) -> bool:
+    """
+    Быстрая проверка физического наличия интернета и доступности спутниковых сервисов.
+    Проверяет соединение с DNS (1.1.1.1, 8.8.8.8) или хостом Copernicus CDSE.
+    """
+    targets = [
+        ("1.1.1.1", 53),
+        ("8.8.8.8", 53),
+        ("dataspace.copernicus.eu", 443),
+        ("firms.modaps.eosdis.nasa.gov", 443),
+    ]
+    for host, port in targets:
+        try:
+            sock = socket.create_connection((host, port), timeout=timeout_sec)
+            sock.close()
+            return True
+        except OSError:
+            continue
+    return False
 
 
 class DataSourceType(str, Enum):
@@ -66,6 +88,10 @@ class SatelliteDataProvider:
         """Проверяет, разрешен ли онлайн-доступ в текущем режиме."""
         return self.mode in (DataSourceType.ONLINE, DataSourceType.HYBRID)
 
+    def check_reachability(self, timeout_sec: float = 1.5) -> bool:
+        """Проверяет физическое наличие соединения с внешним интернетом/спутниками."""
+        return check_internet_reachability(timeout_sec=timeout_sec)
+
     def get_thermal_points(
         self,
         bbox: Tuple[float, float, float, float],
@@ -84,7 +110,24 @@ class SatelliteDataProvider:
         if self.mode == DataSourceType.OFFLINE:
             return None, "offline", {"mode": "offline", "provider": "Local Chip Archive"}
 
-        # 2. Если онлайн или гибрид — пробуем NASA FIRMS
+        # 2. Проверяем доступность интернета
+        internet_ok = self.check_reachability()
+        if not internet_ok:
+            if self.mode == DataSourceType.ONLINE:
+                # В строго онлайн-режиме без интернета — никакой подмены архивными данными!
+                return [], "online_no_internet", {
+                    "mode": "online",
+                    "error": "Отсутствует подключение к сети Интернет. Спутниковые данные недоступны.",
+                    "count": 0
+                }
+            # В режиме HYBRID: штатный переход на локальный архив
+            logger.warning("[SatelliteProvider] Интернет недоступен, режим HYBRID переходит на локальный архив.")
+            return None, "offline_fallback", {
+                "mode": "hybrid",
+                "provider": "Local Archive Fallback (No Internet)"
+            }
+
+        # 3. Если онлайн или гибрид и есть интернет — пробуем NASA FIRMS
         if self.firms.is_configured():
             try:
                 features = self.firms.fetch_active_fires(
@@ -114,7 +157,7 @@ class SatelliteDataProvider:
             except Exception as exc:
                 logger.error("[SatelliteProvider] Ошибка запроса к NASA FIRMS: %s", exc)
 
-        # 3. Fallback в режиме HYBRID: если ключа нет или запрос не дал результатов
+        # 4. Fallback в режиме HYBRID: если ключа нет или запрос завершился ошибкой
         if self.mode == DataSourceType.HYBRID:
             logger.info("[SatelliteProvider] Fallback на локальный каталог чипов (режим HYBRID).")
             return None, "offline_fallback", {"mode": "hybrid", "provider": "Local Archive Fallback"}
@@ -168,17 +211,24 @@ class SatelliteDataProvider:
 
     def get_service_status(self) -> Dict[str, Any]:
         """Диагностический статус подключения к спутниковым провайдерам."""
+        internet_ok = self.check_reachability()
+        firms_ready = self.firms.is_configured() and internet_ok
+        cdse_ready = (self.cdse_auth.is_configured() or True) and internet_ok
+
         return {
             "mode": self.mode.value,
+            "internet_available": internet_ok,
+            "online_ready": internet_ok and (self.firms.is_configured() or self.cdse_auth.is_configured()),
             "firms": {
                 "configured": self.firms.is_configured(),
                 "service": "NASA FIRMS (VIIRS 375m NRT)",
-                "status": "ready" if self.firms.is_configured() else "no_api_key"
+                "status": "ready" if firms_ready else ("no_internet" if not internet_ok else "no_api_key")
             },
             "cdse": {
                 "configured": self.cdse_auth.is_configured(),
+                "open_catalog": True,
                 "service": "Copernicus Data Space Ecosystem (Sentinel-2/1)",
-                "status": "ready" if self.cdse_auth.is_configured() else "no_credentials"
+                "status": "ready" if cdse_ready else ("no_internet" if not internet_ok else "unreachable")
             },
             "cache": {
                 "dir": str(self.cache.cache_dir),

@@ -459,9 +459,9 @@
         <div class="form-group">
           <div style="display: flex; gap: 6px; align-items: center;">
             <select id="data-source-select" style="flex: 1;">
-              <option value="offline" selected>📁 Офлайн (архив чипов)</option>
+              <option value="hybrid" selected>🔄 Гибрид (онлайн + fallback)</option>
               <option value="online">🛰️ Онлайн (спутники)</option>
-              <option value="hybrid">🔄 Гибрид (онлайн + fallback)</option>
+              <option value="offline">📁 Офлайн (архив чипов)</option>
             </select>
             <span id="sat-status-dot" title="Статус подключения" style="
               width: 10px; height: 10px; border-radius: 50%;
@@ -664,26 +664,70 @@
     const dataSourceSelect = document.getElementById('data-source-select');
     const onlineInfo = document.getElementById('online-info');
     const satStatusDot = document.getElementById('sat-status-dot');
+    const onlineOption = dataSourceSelect.querySelector('option[value="online"]');
 
     function checkSatelliteStatus() {
+      // 1. Проверка через браузерный индикатор
+      const browserOffline = (typeof navigator.onLine === 'boolean') && !navigator.onLine;
+
       fetch('/api/v1/satellites/status')
         .then(r => r.json())
         .then(data => {
-          const firmsOk = data.firms && data.firms.configured;
-          const cdseOk = data.cdse && data.cdse.configured;
-          if (firmsOk || cdseOk) {
+          const internetAvailable = !browserOffline && (data.internet_available !== false);
+          const firmsOk = data.firms && data.firms.configured && internetAvailable;
+          const cdseOk = data.cdse && data.cdse.configured && internetAvailable;
+
+          if (!internetAvailable) {
+            // Интернет недоступен — режим онлайн отключается
+            satStatusDot.style.background = '#ef4444';
+            satStatusDot.title = '⚠️ Подключение к Интернету отсутствует. Спутниковый онлайн-режим заблокирован.';
+            if (onlineOption) {
+              onlineOption.disabled = true;
+              onlineOption.textContent = '🛰️ Онлайн (спутники) [нет сети]';
+            }
+            // Если был выбран 'online', переключаем на безопасный 'offline'
+            if (dataSourceSelect.value === 'online') {
+              dataSourceSelect.value = 'offline';
+              onlineInfo.style.display = 'none';
+            }
+          } else if (firmsOk || cdseOk) {
             satStatusDot.style.background = '#22c55e';
-            satStatusDot.title = `Спутники готовы: FIRMS: ${firmsOk ? 'OK' : 'нет ключа'}, CDSE: ${cdseOk ? 'OK' : 'нет ключа'}`;
+            satStatusDot.title = `🛰️ Спутниковый онлайн активен: Copernicus CDSE: OK (Каталог Sentinel-2/1), FIRMS: ${firmsOk ? 'OK' : 'Архив'}`;
+            if (onlineOption) {
+              onlineOption.disabled = false;
+              onlineOption.textContent = '🛰️ Онлайн (спутники)';
+            }
           } else {
             satStatusDot.style.background = '#eab308';
-            satStatusDot.title = 'Онлайн-спутники: локальный архив чипов активен (ключи в .env не заданы)';
+            satStatusDot.title = 'Онлайн-спутники: локальный архив чипов';
+            if (onlineOption) {
+              onlineOption.disabled = false;
+              onlineOption.textContent = '🛰️ Онлайн (спутники)';
+            }
           }
         })
         .catch(() => {
-          satStatusDot.style.background = '#6b7280';
+          satStatusDot.style.background = '#ef4444';
+          satStatusDot.title = '⚠️ Сервис недоступен или нет подключения к сети.';
+          if (onlineOption) {
+            onlineOption.disabled = true;
+            onlineOption.textContent = '🛰️ Онлайн (спутники) [нет сети]';
+          }
+          if (dataSourceSelect.value === 'online') {
+            dataSourceSelect.value = 'offline';
+            onlineInfo.style.display = 'none';
+          }
         });
     }
+
+    // Слушатели событий онлайн/оффлайн браузера
+    window.addEventListener('online', checkSatelliteStatus);
+    window.addEventListener('offline', checkSatelliteStatus);
+
     checkSatelliteStatus();
+    if (dataSourceSelect.value === 'hybrid' || dataSourceSelect.value === 'online') {
+      onlineInfo.style.display = 'block';
+    }
 
     dataSourceSelect.addEventListener('change', () => {
       const mode = dataSourceSelect.value;
