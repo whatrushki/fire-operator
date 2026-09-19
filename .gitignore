@@ -2,10 +2,30 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.coverage
+htmlcov/
 node_modules/
 *.log
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Heavy datasets and generated submissions
 data/
 *.tar
+*.tar.gz
 *.zip
 !backend/storage/*.zip
-submission.csv
+submission*.csv
+
+# OS and Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
