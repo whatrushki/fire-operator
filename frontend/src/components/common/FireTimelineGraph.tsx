@@ -61,6 +61,8 @@ export const FireTimelineGraph: React.FC<FireTimelineGraphProps> = ({
     return () => clearInterval(timer);
   }, [isPlaying, currentPhase, onPhaseChange, isFreshFire]);
 
+  const hasFireData = totalAreaHa > 0 || hotspotsCount > 0;
+
   const phasesInfo = [
     {
       id: 'pre' as FirePhase,
@@ -70,33 +72,39 @@ export const FireTimelineGraph: React.FC<FireTimelineGraphProps> = ({
       badgeBg: 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300',
       activeBorder: 'border-emerald-500 bg-emerald-500/20 text-white shadow-emerald-500/25',
       icon: Trees,
-      desc: 'Здоровый растительный покров: высокий NDVI (0.68), естественный фон, 0 термоаномалий.',
+      desc: hasFireData
+        ? 'Здоровый растительный покров до инцидента: естественный фон (NDVI ~ 0.68).'
+        : 'Естественный фоновый растительный покров: высокий NDVI (0.70), термоаномалий нет.',
       statLabel: 'Индекс NDVI',
-      statValue: '0.68 (норма)',
+      statValue: hasFireData ? '0.68 (до)' : '0.70 (норма)',
       isFreshDisabled: false,
     },
     {
       id: 'peak' as FirePhase,
       title: '2. Пик горения',
-      subtitle: 'Очаги (Active Fire)',
+      subtitle: hasFireData ? 'Очаги (Active Fire)' : 'Очагов нет',
       color: 'red',
       badgeBg: 'bg-red-500/15 border-red-500/40 text-red-300',
       activeBorder: 'border-red-500 bg-red-500/25 text-white shadow-red-500/30',
       icon: Flame,
-      desc: 'Фаза активного пламени (длительность ~24 ч): резкий перепад температуры I4-I5 > 25K, детектирование VIIRS 375м.',
+      desc: hasFireData
+        ? 'Фаза активного пламени: резкий температурный скачок I4-I5 > 15K, детектирование VIIRS 375м.'
+        : 'Открытого горения и термических аномалий VIIRS за выбранный период не зафиксировано.',
       statLabel: 'Термоточек VIIRS',
-      statValue: `${hotspotsCount > 0 ? hotspotsCount : 0} очагов`,
+      statValue: `${hotspotsCount} очагов`,
       isFreshDisabled: false,
     },
     {
       id: 'burn' as FirePhase,
       title: '3. Гарь (Пост)',
-      subtitle: 'Зонирование (Burn Scar)',
+      subtitle: hasFireData ? 'Зонирование (Burn Scar)' : 'Гарей нет',
       color: 'orange',
       badgeBg: 'bg-orange-500/15 border-orange-500/40 text-orange-300',
       activeBorder: 'border-orange-500 bg-orange-500/25 text-white shadow-orange-500/30',
       icon: TrendingDown,
-      desc: 'Послепожарный контур Sentinel-2: падение NDVI, скачок dNBR, классификация 3 степеней поражения.',
+      desc: hasFireData
+        ? 'Послепожарный контур Sentinel-2: падение NDVI, скачок dNBR, классификация 3 степеней поражения.'
+        : 'Следов гарей и спектральных аномалий dNBR в анализируемом полигоне не обнаружено.',
       statLabel: 'Площадь гари',
       statValue: `${totalAreaHa > 0 ? totalAreaHa.toFixed(1) : '0.0'} га`,
       isFreshDisabled: false,
@@ -104,7 +112,7 @@ export const FireTimelineGraph: React.FC<FireTimelineGraphProps> = ({
     {
       id: 'recovery' as FirePhase,
       title: isFreshFire ? '4. Восстановление' : '4. Восстановление',
-      subtitle: isFreshFire ? 'Фаза не наступила' : 'Регенерация (Recovery)',
+      subtitle: !hasFireData ? 'Норма' : isFreshFire ? 'Фаза не наступила' : 'Регенерация (Recovery)',
       color: isFreshFire ? 'neutral' : 'cyan',
       badgeBg: isFreshFire
         ? 'bg-neutral-800 border-neutral-700 text-neutral-400'
@@ -113,11 +121,13 @@ export const FireTimelineGraph: React.FC<FireTimelineGraphProps> = ({
         ? 'border-neutral-500 bg-neutral-800/80 text-neutral-300'
         : 'border-cyan-500 bg-cyan-500/25 text-white shadow-cyan-500/30',
       icon: RefreshCw,
-      desc: isFreshFire
-        ? 'Пожар свежий (< 30 дней) — фаза активной гари и тления. Растительный покров еще не успел восстановиться (период сукцессии 1–3 года).'
-        : 'Экологическая сукцессия: постепенное зарастание пионерными травами, падение dNBR, регенерация почвы.',
-      statLabel: isFreshFire ? 'Статус регенерации' : 'Прогноз сукцессии',
-      statValue: isFreshFire ? '0% (Свежий пожар)' : '+18% биомассы/год',
+      desc: !hasFireData
+        ? 'Растительный покров стабилен, нарушение структуры биомассы не зафиксировано.'
+        : isFreshFire
+        ? 'Пожар свежий — фаза активной гари и тления. Растительный покров еще не успел восстановиться.'
+        : 'Экологическая сукцессия: постепенное зарастание пионерными травами, регенерация почвы.',
+      statLabel: 'Статус покрова',
+      statValue: !hasFireData ? '100% (Норма)' : isFreshFire ? '0% (Свежий)' : '+18%/год',
       isFreshDisabled: isFreshFire,
     },
   ];
@@ -128,22 +138,30 @@ export const FireTimelineGraph: React.FC<FireTimelineGraphProps> = ({
         {/* HEADER BAR */}
         <div className="flex items-center justify-between gap-2 border-b border-white/10 pb-2">
           <div className="flex items-center gap-2 min-w-0">
-            <div className="p-1 rounded-xl bg-orange-500/20 border border-orange-500/30 text-orange-400 shrink-0">
-              <Sparkles className="w-3.5 h-3.5" />
+            <div className={`p-1 rounded-xl border shrink-0 ${
+              hasFireData
+                ? 'bg-orange-500/20 border-orange-500/30 text-orange-400'
+                : 'bg-emerald-500/20 border-emerald-500/30 text-emerald-400'
+            }`}>
+              {hasFireData ? <Sparkles className="w-3.5 h-3.5" /> : <Trees className="w-3.5 h-3.5" />}
             </div>
             <div className="truncate">
               <div className="flex items-center gap-1.5 flex-wrap">
                 <h3 className="font-extrabold text-[11px] text-white uppercase tracking-wider truncate">
-                  Динамика природного пожара
+                  {hasFireData ? 'Динамика природного пожара' : 'Мониторинг фонового состояния'}
                 </h3>
-                {isFreshFire && (
-                  <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 font-mono">
-                    Свежий пожар
-                  </span>
-                )}
+                <span className={`text-[9px] px-1.5 py-0.2 rounded-full font-mono border ${
+                  hasFireData
+                    ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+                    : 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                }`}>
+                  {hasFireData ? (isFreshFire ? 'Инцидент зафиксирован' : 'Гарь в архиве') : 'Норма (0 га)'}
+                </span>
               </div>
               <p className="text-[9px] text-neutral-400 truncate">
-                {isFreshFire ? 'Инцидент: До → Пик горения → Активная гарь (без регенерации)' : 'Полный цикл: До → Пик → Гарь → Восстановление'}
+                {hasFireData
+                  ? (isFreshFire ? 'Инцидент: До → Пик горения → Активная гарь' : 'Полный цикл: До → Пик → Гарь → Восстановление')
+                  : 'Термоаномалий не выявлено: вегетационный покров стабилен'}
               </p>
             </div>
           </div>
@@ -269,11 +287,21 @@ export const FireTimelineGraph: React.FC<FireTimelineGraphProps> = ({
                   <rect x="600" y="0" width="200" height="60" fill={isFreshFire ? "#737373" : "#06B6D4"} fillOpacity="0.08" />
                 )}
 
-                {/* Peak fire glow area */}
-                <polygon points="280,60 380,10 440,25 480,60" fill="url(#fireGlow)" />
+                {/* Peak fire glow area (only when fire data exists) */}
+                {hasFireData && (
+                  <polygon points="280,60 380,10 440,25 480,60" fill="url(#fireGlow)" />
+                )}
 
                 {/* Green NDVI curve */}
-                {isFreshFire ? (
+                {!hasFireData ? (
+                  <path
+                    d="M 0 18 L 800 18"
+                    fill="none"
+                    stroke="#10B981"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                  />
+                ) : isFreshFire ? (
                   <path
                     d="M 0 16 Q 160 16, 260 22 T 350 54 Q 450 56, 560 54 L 800 54"
                     fill="none"
@@ -293,7 +321,15 @@ export const FireTimelineGraph: React.FC<FireTimelineGraphProps> = ({
                 )}
 
                 {/* Orange dNBR curve */}
-                {isFreshFire ? (
+                {!hasFireData ? (
+                  <path
+                    d="M 0 52 L 800 52"
+                    fill="none"
+                    stroke="#F97316"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+                ) : isFreshFire ? (
                   <path
                     d="M 0 52 Q 180 52, 270 45 T 370 12 Q 440 18, 540 26 L 800 30"
                     fill="none"
@@ -311,11 +347,22 @@ export const FireTimelineGraph: React.FC<FireTimelineGraphProps> = ({
                   />
                 )}
 
-                {/* Thermal anomaly dots at peak */}
-                <circle cx="340" cy="18" r="4" fill="#EF4444" className="animate-ping" />
-                <circle cx="340" cy="18" r="3.5" fill="#EF4444" />
-                <circle cx="365" cy="12" r="3.5" fill="#EF4444" />
-                <circle cx="390" cy="16" r="3.5" fill="#EF4444" />
+                {/* Watermark in background when no fires */}
+                {!hasFireData && (
+                  <text x="400" y="38" fill="#52525B" fontSize="10" fontFamily="monospace" textAnchor="middle" fontWeight="bold">
+                    [ Фоновый мониторинг: вегетационный покров стабилен, гарей нет ]
+                  </text>
+                )}
+
+                {/* Thermal anomaly dots at peak (only when fire detected) */}
+                {hasFireData && (
+                  <>
+                    <circle cx="340" cy="18" r="4" fill="#EF4444" className="animate-ping" />
+                    <circle cx="340" cy="18" r="3.5" fill="#EF4444" />
+                    <circle cx="365" cy="12" r="3.5" fill="#EF4444" />
+                    <circle cx="390" cy="16" r="3.5" fill="#EF4444" />
+                  </>
+                )}
 
                 {/* Phase Cursor Line */}
                 {currentPhase === 'pre' && <line x1="100" y1="0" x2="100" y2="60" stroke="#10B981" strokeWidth="2" />}

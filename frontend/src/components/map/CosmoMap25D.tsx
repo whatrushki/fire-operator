@@ -18,6 +18,7 @@ import {
   Columns2,
   ZoomIn,
   ZoomOut,
+  Layers,
 } from 'lucide-react';
 
 // Static Regional Labels across Russia for clear geographic orientation
@@ -104,8 +105,22 @@ export const CosmoMap25D: React.FC<CosmoMap25DProps> = ({
   dateAfter = '2024-09-15',
   currentPhase = 'burn',
 }) => {
-  // Base map style: 'satellite' (ArcGIS World Imagery) or 'osm' (OpenStreetMap)
-  const [baseMapType, setBaseMapType] = useState<'satellite' | 'osm'>('satellite');
+  // Base map style: 'osm' (OpenStreetMap) or 'satellite' (ESRI World Imagery)
+  const [baseMapType, setBaseMapType] = useState<'satellite' | 'osm'>('osm');
+
+  // Satellite coverage footprints from backend catalog
+  const [coverageData, setCoverageData] = useState<any | null>(null);
+  const [showCoverage, setShowCoverage] = useState(true);
+
+  // Fetch real satellite footprint catalog on mount
+  useEffect(() => {
+    fetch('/api/v1/satellite/coverage')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data) setCoverageData(data);
+      })
+      .catch(() => {});
+  }, []);
 
   // Split view divider position (percentage 0..100)
   const [splitPos, setSplitPos] = useState(50);
@@ -193,7 +208,7 @@ export const CosmoMap25D: React.FC<CosmoMap25DProps> = ({
     const tileUrl =
       baseMapType === 'osm'
         ? 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
-        : 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+        : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 
     const labelsData = [...REGIONAL_LABELS];
     if (selectedZone) {
@@ -255,7 +270,7 @@ export const CosmoMap25D: React.FC<CosmoMap25DProps> = ({
     const tileUrl =
       baseMapType === 'osm'
         ? 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
-        : 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+        : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 
     resultLayers.push(
       new TileLayer({
@@ -274,6 +289,39 @@ export const CosmoMap25D: React.FC<CosmoMap25DProps> = ({
         },
       })
     );
+
+    // 1.1 SATELLITE COVERAGE FOOTPRINTS (Sentinel-2 archive passes)
+    if (showCoverage && coverageData?.features?.length) {
+      resultLayers.push(
+        new GeoJsonLayer({
+          id: 'satellite-coverage-footprints',
+          data: coverageData,
+          pickable: true,
+          stroked: true,
+          filled: true,
+          lineWidthMinPixels: 1.5,
+          getFillColor: (f: any) =>
+            f.properties?.kind === 'sentinel2_preset' ? [16, 185, 129, 30] : [6, 182, 212, 25],
+          getLineColor: (f: any) =>
+            f.properties?.kind === 'sentinel2_preset' ? [16, 185, 129, 200] : [6, 182, 212, 180],
+          getLineWidth: 2,
+          onHover: (info: any) => {
+            if (info.object) {
+              setHoverInfo({
+                x: info.x,
+                y: info.y,
+                title: info.object.properties?.title || 'Спутниковый пролёт Sentinel-2',
+                items: [
+                  { label: 'Chip ID', value: info.object.properties?.chip_id || '' },
+                  { label: 'Период ДЗЗ', value: `${info.object.properties?.date_pre || ''} — ${info.object.properties?.date_post || ''}` },
+                  { label: 'Статус', value: 'Снимок доступен в архиве' },
+                ],
+              });
+            }
+          },
+        })
+      );
+    }
 
     // 2. REGION & CITY TEXT LABELS LAYER
     const labelsData = [...REGIONAL_LABELS];
@@ -438,7 +486,8 @@ export const CosmoMap25D: React.FC<CosmoMap25DProps> = ({
             getPath: (d: any) => d.path,
             getColor: () => [34, 211, 238, 255],
             widthMinPixels: 3,
-            rounded: true,
+            jointRounded: true,
+            capRounded: true,
           })
         );
       }
@@ -468,6 +517,8 @@ export const CosmoMap25D: React.FC<CosmoMap25DProps> = ({
     thermalGeoJson,
     selectedFeature,
     drawnPoints,
+    showCoverage,
+    coverageData,
   ]);
 
   return (
@@ -551,8 +602,18 @@ export const CosmoMap25D: React.FC<CosmoMap25DProps> = ({
 
       {/* 4. TOP MAP CONTROLS: BASE MAP TOGGLE & ZOOM */}
       <div className="absolute top-20 right-6 z-30 flex flex-col gap-2 pointer-events-auto">
-        {/* Toggle Satellite / OpenStreetMap */}
+        {/* Toggle Satellite / OpenStreetMap / Footprints */}
         <div className="p-1 rounded-2xl bg-[#121316]/90 border border-white/15 backdrop-blur-2xl shadow-xl flex items-center gap-1">
+          <button
+            onClick={() => setBaseMapType('osm')}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+              baseMapType === 'osm'
+                ? 'bg-orange-500 text-white shadow-md shadow-orange-500/30'
+                : 'text-neutral-400 hover:text-white'
+            }`}
+          >
+            OSM
+          </button>
           <button
             onClick={() => setBaseMapType('satellite')}
             className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
@@ -563,15 +624,18 @@ export const CosmoMap25D: React.FC<CosmoMap25DProps> = ({
           >
             Спутник
           </button>
+          <div className="w-px h-4 bg-white/15 mx-0.5" />
           <button
-            onClick={() => setBaseMapType('osm')}
-            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-              baseMapType === 'osm'
-                ? 'bg-orange-500 text-white shadow-md shadow-orange-500/30'
+            onClick={() => setShowCoverage((prev) => !prev)}
+            className={`px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+              showCoverage
+                ? 'bg-cyan-600 text-white shadow-md shadow-cyan-500/30'
                 : 'text-neutral-400 hover:text-white'
             }`}
+            title="Отобразить контуры всех доступных пролетов Sentinel-2 в каталоге"
           >
-            OpenStreetMap
+            <Layers className="w-3.5 h-3.5" />
+            <span>Снимки ДЗЗ</span>
           </button>
         </div>
 

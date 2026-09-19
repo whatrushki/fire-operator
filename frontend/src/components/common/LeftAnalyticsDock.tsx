@@ -45,6 +45,16 @@ export const BACKEND_PRESETS: ZonePreset[] = [
     description: 'Прибрежная полоса Цимлянского водохранилища и сухостойные степи (UTM 38N)',
   },
   {
+    id: 'rostov_aksay',
+    name: 'Ростов-на-Дону (Аксай / Щепкинский лес)',
+    region: 'Ростов-на-Дону (UTM 37N)',
+    bbox: [39.8336, 47.1510, 39.9704, 47.2442],
+    center: [39.9020, 47.1976],
+    dateFrom: '2024-09-01',
+    dateTo: '2024-09-30',
+    description: 'Пригородная лесопарковая зона и пойма Дона (Sentinel-2 BS_tr_000191, 688 га)',
+  },
+  {
     id: 'rostov',
     name: 'Ростовская область (Орловский/Маныч)',
     region: 'Ростовская обл. (UTM 38N)',
@@ -294,6 +304,28 @@ export const LeftAnalyticsDock: React.FC<LeftAnalyticsDockProps> = ({
             </span>
           </div>
         </div>
+
+        {/* SENSING CONTEXT / NEAREST PASS INFO */}
+        {report && (report as any).nearest_scene && (
+          <div className="p-2.5 rounded-2xl bg-cyan-950/40 border border-cyan-500/30 text-[11px] text-cyan-200 space-y-1">
+            <div className="flex items-center gap-1.5 font-bold text-cyan-300">
+              <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              <span>Смежный спутниковый снимок</span>
+            </div>
+            <p className="text-[10px] text-neutral-300 leading-tight">
+              Для точного квадрата прямых снимков нет. Подключена сцена <span className="font-mono text-white font-bold">{(report as any).nearest_scene.chip_id}</span> ({(report as any).nearest_scene.distance_km} км от полигона).
+            </p>
+          </div>
+        )}
+
+        {report && totalAreaHa === 0 && thermalAnomalies === 0 && (
+          <div className="p-2.5 rounded-2xl bg-emerald-950/40 border border-emerald-500/30 text-[11px] text-emerald-200 space-y-1">
+            <span className="font-bold text-emerald-300 block">🟢 Территория вне зоны горения</span>
+            <p className="text-[10px] text-neutral-300 leading-tight">
+              За выбранный период открытого огня VIIRS и следов гарей не обнаружено (0.0 га). Растительный покров стабилен.
+            </p>
+          </div>
+        )}
 
         {/* CARD 2: TOTAL AREA & ACTIVE HOTSPOTS */}
         <div className="grid grid-cols-2 gap-2 p-3 rounded-3xl bg-[#121316]/95 border border-white/10 backdrop-blur-2xl shadow-2xl">

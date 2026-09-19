@@ -242,11 +242,81 @@ class SatelliteCatalog:
         matches.sort(key=lambda x: x[0], reverse=True)
         return [m[1] for m in matches[:max_scenes]]
 
-    def get_preset(self, region_key: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        """Получение пары чипов (BS, AF) для одного из 4 целевых регионов."""
+    def find_nearest_bs_scene(self, query_geom) -> Optional[Dict[str, Any]]:
+        """Поиск ближайшей спутниковой сцены Sentinel-2 при отсутствии прямого перекрытия."""
         self.initialize()
-        bs_scene = self.preset_scenes.get(f"bs_{region_key.lower()}")
-        af_scene = self.preset_scenes.get(f"af_{region_key.lower()}")
+        best_dist = float('inf')
+        best_scene = None
+        for s in self.bs_scenes:
+            d = query_geom.distance(s["wgs_geom"])
+            if d < best_dist:
+                best_dist = d
+                best_scene = s
+        for k, s in self.preset_scenes.items():
+            if k.startswith("bs_"):
+                d = query_geom.distance(s["wgs_geom"])
+                if d < best_dist:
+                    best_dist = d
+                    best_scene = s
+        if best_scene:
+            dist_km = round(best_dist * 95.0, 1)
+            return {
+                "chip_id": best_scene["chip_id"],
+                "distance_km": dist_km,
+                "date_pre": best_scene.get("date_pre", ""),
+                "date_post": best_scene.get("date_post", ""),
+                "scene": best_scene
+            }
+        return None
+
+    def get_coverage_geojson(self) -> Dict[str, Any]:
+        """Возвращает векторный слой GeoJSON всех доступных пролётов Sentinel-2 и региональных массивов."""
+        self.initialize()
+        features = []
+        for s in self.bs_scenes:
+            features.append({
+                "type": "Feature",
+                "id": s["chip_id"],
+                "geometry": mapping(s["wgs_geom"]),
+                "properties": {
+                    "chip_id": s["chip_id"],
+                    "kind": "sentinel2",
+                    "title": f"Sentinel-2 ({s['chip_id']})",
+                    "date_pre": s.get("date_pre", ""),
+                    "date_post": s.get("date_post", ""),
+                    "fire_event_id": s.get("fire_event_id", ""),
+                }
+            })
+        for k, s in self.preset_scenes.items():
+            if k.startswith("bs_"):
+                features.append({
+                    "type": "Feature",
+                    "id": s["chip_id"],
+                    "geometry": mapping(s["wgs_geom"]),
+                    "properties": {
+                        "chip_id": s["chip_id"],
+                        "kind": "sentinel2_preset",
+                        "title": f"Региональный массив: {s.get('region', k).capitalize()}",
+                        "date_pre": s.get("date_pre", ""),
+                        "date_post": s.get("date_post", ""),
+                    }
+                })
+        return {
+            "type": "FeatureCollection",
+            "features": features
+        }
+
+    def get_preset(self, region_key: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Получение пары чипов (BS, AF) для одного из целевых регионов."""
+        self.initialize()
+        r_low = region_key.lower()
+        if r_low in ["rostov_forest", "rostov_aksay", "schepkin"]:
+            scene_191 = next((s for s in self.bs_scenes if s["chip_id"] == "BS_tr_000191"), None)
+            af_scene = self.preset_scenes.get("af_rostov")
+            return scene_191, af_scene
+
+        bs_scene = self.preset_scenes.get(f"bs_{r_low}")
+        af_scene = self.preset_scenes.get(f"af_{r_low}")
         return bs_scene, af_scene
 
     def run_bs_inference(

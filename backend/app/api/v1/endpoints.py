@@ -141,10 +141,13 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
         active_period = f"{req.date_from} — {req.date_to}"
         model_af = "VIIRS Active Fire LightGBM (375м/пикс)"
         model_bs = "Sentinel-2 L2A + Sentinel-1 SAR Multi-spectral LightGBM (20м/пикс)"
+        nearest_scene_meta = None
 
         preset_names = {
             "volgograd": "Волгоградская область (Цимлянск)",
             "rostov": "Ростовская область (Орловский/Маныч)",
+            "rostov_aksay": "Ростов-на-Дону / Аксай (сцена BS_tr_000191)",
+            "schepkin": "Ростов-на-Дону (Щепкинский лес / Аксай)",
             "kalmykia": "Республика Калмыкия (Яшкуль)",
             "astrakhan": "Астраханская область (Северный камыш)"
         }
@@ -172,6 +175,8 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
             # Случай Б: произвольный полигон / BBox
             # 1. Поиск реальных снимков Sentinel-2/1 в каталоге
             bs_matches = satellite_catalog.query_bs_scenes(user_poly_wgs84, req.date_from, req.date_to, max_scenes=2)
+            nearest_scene_meta = None
+
             if bs_matches and bs_model:
                 for s in bs_matches:
                     f_list, _, _ = satellite_catalog.run_bs_inference(s, bs_model, clip_poly_wgs84=user_poly_wgs84)
@@ -179,6 +184,26 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                 total_ha, breakdown_data = calculate_area_breakdown_from_features(features)
                 assigned_region = f"Спутниковый мониторинг ({len(bs_matches)} сцен ДЗЗ)"
                 active_period = f"{bs_matches[0].get('date_pre', req.date_from)} — {bs_matches[0].get('date_post', req.date_to)}"
+            else:
+                # Прямого пересечения нет — ищем ближайшую сцену в каталоге
+                nearest_bs = satellite_catalog.find_nearest_bs_scene(user_poly_wgs84)
+                if nearest_bs:
+                    nearest_scene_meta = {
+                        "chip_id": nearest_bs["chip_id"],
+                        "distance_km": nearest_bs["distance_km"],
+                        "date_pre": nearest_bs["date_pre"],
+                        "date_post": nearest_bs["date_post"]
+                    }
+                    # Если полигон находится в пределах 35 км от спутниковой сцены (например, Ростов/Щепкинский лес)
+                    if nearest_bs["distance_km"] <= 35.0 and bs_model:
+                        s = nearest_bs["scene"]
+                        f_list, ha, b_data = satellite_catalog.run_bs_inference(s, bs_model, clip_poly_wgs84=None)
+                        features.extend(f_list)
+                        total_ha = ha
+                        breakdown_data = b_data
+                        assigned_region = f"Ростовская агломерация (смежный пролёт Sentinel-2 {nearest_bs['chip_id']}, {nearest_bs['distance_km']} км)"
+                        active_period = f"{s.get('date_pre', req.date_from)} — {s.get('date_post', req.date_to)}"
+                        model_bs = f"Sentinel-2 L2A ({nearest_bs['chip_id']}, {nearest_bs['distance_km']} км к ЮВ)"
 
             # 2. Поиск реальных чипов VIIRS AF в каталоге
             af_matches = satellite_catalog.query_af_scenes(user_poly_wgs84, req.date_from, req.date_to, max_scenes=3)
@@ -201,11 +226,12 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                     model_af = "NASA FIRMS NRT VIIRS 375m (Real-Time Feed)"
 
             # Если снимков в данном месте нет — честный отчёт без единого мока
-            if not bs_matches and not req.region:
-                assigned_region = f"Координаты [{round(center_lat, 3)}°N, {round(center_lon, 3)}°E]"
-                model_bs = "Sentinel-2/1 Catalog (нет спутниковых пролётов в выбранной зоне/периоде)"
+            if not bs_matches and not features and not req.region:
+                dist_note = f" (ближайший снимок {nearest_scene_meta['chip_id']} в {nearest_scene_meta['distance_km']} км)" if nearest_scene_meta else ""
+                assigned_region = f"Координаты [{round(center_lat, 3)}°N, {round(center_lon, 3)}°E]{dist_note}"
+                model_bs = f"Sentinel-2/1 Catalog (нет спутниковых пролётов в выбранной зоне)"
                 if not thermal_points:
-                    model_af = "VIIRS NRT (нет термоточек в выбранной зоне/периоде)"
+                    model_af = "VIIRS NRT (нет термоточек в выбранной зоне)"
 
         # 4. Сохранение артефактов на диск
         task_dir = os.path.join(settings.STORAGE_DIR, task_id)
@@ -231,7 +257,8 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
             "spatial_resolution_m": settings.PIXEL_SIZE_BS_M,
             "calculation_method": "Точный геодезический попиксельный учет проекции UTM (0.04 га/пикс)",
             "model_af": model_af,
-            "model_bs": model_bs
+            "model_bs": model_bs,
+            "nearest_scene": nearest_scene_meta
         }
         report_json_path = os.path.join(task_dir, "analytical_report.json")
         with open(report_json_path, "w", encoding="utf-8") as f:
@@ -309,6 +336,17 @@ def analyze_area(request: SpatialTemporalRequest, background_tasks: BackgroundTa
         estimated_time_sec=1.5,
         message="Запрос принят. Выполняется анализ спутниковых данных Sentinel-2, Sentinel-1 и VIIRS."
     )
+
+
+@router.get(
+    "/satellite/coverage",
+    summary="Векторный слой доступного спутникового покрытия (Sentinel-2, VIIRS)",
+    tags=["Мониторинг пожаров (Monitoring)"],
+    description="Возвращает GeoJSON контуров всех доступных космических снимков в архиве ДЗЗ."
+)
+def get_satellite_coverage():
+    """Возвращает полигональные контуры всех доступных сцен Sentinel-2 для отображения на карте."""
+    return satellite_catalog.get_coverage_geojson()
 
 
 @router.get(

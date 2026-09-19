@@ -142,6 +142,7 @@ class AnalyticalReport(BaseModel):
     region: Optional[str] = Field(None, description="Регион мониторинга")
     model_af: Optional[str] = Field(None, description="Использованная модель / источник Active Fire")
     model_bs: Optional[str] = Field(None, description="Использованная модель / источник Burn Severity")
+    nearest_scene: Optional[Dict[str, Any]] = Field(None, description="Информация о ближайшей спутниковой сцене при отсутствии прямого перекрытия")
     calculation_method: str = Field(
         default="Точный геодезический попиксельный учет проекции UTM (0.04 га/пикс)",
         description="Методика расчета площадей"

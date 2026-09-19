@@ -97,7 +97,11 @@ def test_preset_analysis():
     })
     assert resp.status_code == 202
     tid = resp.json()["task_id"]
-    time.sleep(1.0)
+    for _ in range(20):
+        st = client.get(f"/api/v1/tasks/{tid}").json().get("status")
+        if st in ["completed", "failed"]:
+            break
+        time.sleep(0.3)
     rep = client.get(f"/api/v1/report/{tid}").json()
     assert rep["total_burned_area_ha"] > 0
     assert rep["active_thermal_anomalies_count"] > 0
