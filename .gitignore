@@ -12,6 +12,7 @@ node_modules/
 venv/
 env/
 ENV/
+.runtime-deps/
 
 # Heavy datasets and generated submissions
 data/
