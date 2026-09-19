@@ -452,10 +452,6 @@
             </div>
           </div>
         </div>
-        <div class="checkbox-group">
-          <input type="checkbox" id="chk-radar" checked />
-          <label for="chk-radar">Радиолокация Sentinel-1 SAR (сквозь дым)</label>
-        </div>
       </div>
 
       <button id="btn-run" class="btn-submit">
@@ -531,15 +527,16 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <script>
-    // 1. Инициализация карты Leaflet
+    // 1. Инициализация карты Leaflet с рендерингом на едином Canvas (высокая производительность)
     const map = L.map('map', {
+      preferCanvas: true,
       center: [48.0, 44.0],
       zoom: 8,
       zoomControl: false
     });
     L.control.zoom({ position: 'topright' }).addTo(map);
 
-    // Базовые подложки без водяных знаков и ограничений
+    // Базовые подложки карты без требований API-ключей и без водяных знаков
     const osmLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>',
       maxZoom: 19
@@ -550,7 +547,12 @@
       maxZoom: 18
     });
 
-    // По умолчанию включаем чистую подложку OSM
+    const esriTopoLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {
+      attribution: 'Tiles &copy; Esri &mdash; Topographic',
+      maxZoom: 18
+    });
+
+    // По умолчанию включаем чистую подложку OSM (без водяных знаков)
     osmLayer.addTo(map);
 
     // Слои геометрий
@@ -561,6 +563,7 @@
     // Переключатель слоев карты и контуров
     L.control.layers({
       "Схема (OpenStreetMap)": osmLayer,
+      "Топографическая (Esri Topo)": esriTopoLayer,
       "Космоснимок (Esri Satellite)": esriSatLayer
     }, {
       "Контуры гарей": burnLayerGroup,
@@ -794,7 +797,7 @@
         region: chosenRegion !== 'custom' ? chosenRegion : null,
         date_from: document.getElementById('date-from').value,
         date_to: document.getElementById('date-to').value,
-        include_radar: document.getElementById('chk-radar').checked
+        include_radar: true
       };
 
       try {

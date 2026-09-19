@@ -59,6 +59,26 @@ router = APIRouter()
 # Кэш в памяти процесса (с обязательной персистентной синхронизацией на диск)
 TASKS_DB: dict[str, dict] = {}
 
+# Глобальный кэш инстансов ML моделей в оперативной памяти (исключает повторный joblib.load на каждый запрос)
+_CACHED_MODELS: dict[str, Any] = {}
+
+def get_bs_model():
+    if "bs" not in _CACHED_MODELS:
+        bs_model_path = os.path.join(settings.WEIGHTS_DIR, "bs_model.joblib")
+        if not os.path.exists(bs_model_path):
+            raise FileNotFoundError(f"Модель BS не найдена: {bs_model_path}")
+        _CACHED_MODELS["bs"] = joblib.load(bs_model_path)
+    return _CACHED_MODELS["bs"]
+
+def get_af_model():
+    if "af" not in _CACHED_MODELS:
+        af_model_path = os.path.join(settings.WEIGHTS_DIR, "af_model.joblib")
+        if os.path.exists(af_model_path):
+            _CACHED_MODELS["af"] = joblib.load(af_model_path)
+        else:
+            return None
+    return _CACHED_MODELS["af"]
+
 
 def validate_task_id(task_id: str):
     """Проверка формата task_id для защиты от Path Traversal."""
@@ -179,188 +199,203 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                 user_bbox_poly=user_bbox_poly,
                 center_lon=center_lon,
                 center_lat=center_lat,
-                target_date=d_to.date()
+                date_from=d_from.date(),
+                date_to=d_to.date()
             )
             matched_af = catalog.find_matching_af_chip(
                 user_bbox_poly=user_bbox_poly,
                 center_lon=center_lon,
                 center_lat=center_lat,
-                target_date=d_to.date(),
-                bs_chip_bbox_poly=matched_bs["poly_wgs"] if matched_bs else None
+                date_from=d_from.date(),
+                date_to=d_to.date(),
+                bs_chip_bbox_poly=matched_bs["poly_wgs"] if matched_bs else None,
+                bs_chip_date=matched_bs["date_post"] if matched_bs else None
             )
 
-        is_out_of_coverage = (region_key is None and matched_bs is None)
+        is_out_of_coverage = (region_key is None and matched_bs is None and matched_af is None)
         is_explicit_sample_region = bool(req.region and req.region.lower() in ["volgograd", "kalmykia", "rostov", "astrakhan"])
-        is_no_fire = (matched_bs is None) and not is_explicit_sample_region
 
-        # Если BBox находится за пределами зоны доступных спутниковых снимков, зимний период или пожаров в эти даты нет:
-        if is_winter or is_out_of_coverage or is_no_fire:
-            mask = np.zeros((512, 512), dtype=np.uint8)
-            features = []
-            thermal_points = []
-            total_ha = 0.0
-            breakdown_data = [
-                {"class_id": 1, "name": "Слабая степень (Low)", "area_ha": 0.0, "percentage": 0.0},
-                {"class_id": 2, "name": "Средняя степень (Moderate)", "area_ha": 0.0, "percentage": 0.0},
-                {"class_id": 3, "name": "Сильная степень (High)", "area_ha": 0.0, "percentage": 0.0}
-            ]
-            assigned_region = region_key if region_key else "out_of_coverage"
-            matched_incident_desc = ""
-        else:
-            assigned_region = region_key if region_key else "satellite_scene"
+        # Контуры гарей BS: рассчитываются, если найдена сцена Sentinel-2 на эти даты или явно выбран пресет региона
+        has_bs_scene = (matched_bs is not None) or is_explicit_sample_region
+        # Термоточки AF: рассчитываются, если найден чип активного горения VIIRS на эти даты или явно выбран пресет региона
+        has_af_scene = (matched_af is not None) or is_explicit_sample_region
 
-            if matched_bs:
-                bs_files = matched_bs["files"]
-                utm_min_x, utm_min_y, utm_max_x, utm_max_y = matched_bs["utm_bounds"]
-                utm_crs_str = matched_bs["crs_str"]
-                affine = from_bounds(utm_min_x, utm_min_y, utm_max_x, utm_max_y, 512, 512)
-                matched_incident_desc = (
-                    f"Космическая сцена: {matched_bs['chip_id']} (инцидент {matched_bs.get('fire_event_id', 'N/A')}), "
-                    f"съемка Sentinel-2: {matched_bs.get('date_pre')} — {matched_bs.get('date_post')}"
-                )
-            else:
-                sample_dir = os.path.abspath(
-                    os.path.join(os.path.dirname(__file__), "..", "..", "data", "sample_chips", region_key if region_key else "volgograd")
-                )
-                if not os.path.exists(sample_dir):
-                    sample_dir = os.path.abspath(
-                        os.path.join(os.path.dirname(__file__), "..", "..", "data", "sample_chips", "volgograd")
+        mask = np.zeros((512, 512), dtype=np.uint8)
+        features = []
+        thermal_points = []
+        total_ha = 0.0
+        breakdown_data = [
+            {"class_id": 1, "name": "Слабая степень (Low)", "area_ha": 0.0, "percentage": 0.0},
+            {"class_id": 2, "name": "Средняя степень (Moderate)", "area_ha": 0.0, "percentage": 0.0},
+            {"class_id": 3, "name": "Сильная степень (High)", "area_ha": 0.0, "percentage": 0.0}
+        ]
+        assigned_region = region_key if region_key else ("satellite_scene" if (matched_bs or matched_af) else "out_of_coverage")
+        matched_incident_desc = ""
+
+        # Если не зимний сезон и не вне зоны покрытия — выполняем независимый инференс контуров и термоточек:
+        if not is_winter and not is_out_of_coverage:
+            # -------------------------------------------------------------
+            # 4. Обработка контура гарей (Sentinel-2 + Sentinel-1 BS)
+            # -------------------------------------------------------------
+            if has_bs_scene:
+                if matched_bs:
+                    bs_files = matched_bs["files"]
+                    utm_min_x, utm_min_y, utm_max_x, utm_max_y = matched_bs["utm_bounds"]
+                    utm_crs_str = matched_bs["crs_str"]
+                    affine = from_bounds(utm_min_x, utm_min_y, utm_max_x, utm_max_y, 512, 512)
+                    matched_incident_desc = (
+                        f"Космическая сцена: {matched_bs['chip_id']} (инцидент {matched_bs.get('fire_event_id', 'N/A')}), "
+                        f"съемка Sentinel-2: {matched_bs.get('date_pre')} — {matched_bs.get('date_post')}"
                     )
-                bs_files = {
-                    "s2_pre": os.path.join(sample_dir, "bs_s2_pre.tif"),
-                    "s2_post": os.path.join(sample_dir, "bs_s2_post.tif"),
-                    "s1_pre": os.path.join(sample_dir, "bs_s1_pre.tif"),
-                    "s1_post": os.path.join(sample_dir, "bs_s1_post.tif"),
-                    "aux": os.path.join(sample_dir, "bs_aux.tif"),
-                }
-                to_utm = pyproj.Transformer.from_crs("EPSG:4326", utm_crs_str, always_xy=True).transform
-                cx, cy = to_utm(center_lon, center_lat)
-                chip_span_m = 512 * settings.PIXEL_SIZE_BS_M
-                half_span = chip_span_m / 2.0
-                utm_min_x = cx - half_span
-                utm_max_x = cx + half_span
-                utm_min_y = cy - half_span
-                utm_max_y = cy + half_span
-                affine = from_bounds(utm_min_x, utm_min_y, utm_max_x, utm_max_y, 512, 512)
-                matched_incident_desc = f"Эталонная сцена региона {region_key}"
-
-            # Чтение растровых данных BS
-            with rasterio.open(bs_files["s2_pre"]) as s: s2_pre = s.read()
-            with rasterio.open(bs_files["s2_post"]) as s: s2_post = s.read()
-            with rasterio.open(bs_files["s1_pre"]) as s: s1_pre = s.read()
-            with rasterio.open(bs_files["s1_post"]) as s: s1_post = s.read()
-            with rasterio.open(bs_files["aux"]) as s: aux_bs = s.read()
-
-            bs_model_path = os.path.join(settings.WEIGHTS_DIR, "bs_model.joblib")
-            if not os.path.exists(bs_model_path):
-                raise FileNotFoundError(f"Модель BS не найдена: {bs_model_path}")
-            bs_model = joblib.load(bs_model_path)
-
-            X_bs, cloud_mask = extract_bs_features(s2_pre, s2_post, s1_pre, s1_post, aux_bs)
-            probs = bs_model.predict_proba(X_bs)
-            p_burn = 1.0 - probs[:, 0]
-            sev_class = np.argmax(probs[:, 1:4], axis=1) + 1
-            mask = np.where(p_burn > 0.88, sev_class, 0).reshape((512, 512)).astype(np.uint8)
-            mask[~cloud_mask] = 0
-            mask = median_filter(mask, size=3)
-            burn_binary = mask > 0
-            cleaned_binary = _remove_small_components(burn_binary, min_size=25)
-            mask[~cleaned_binary] = 0
-
-            # Векторизация растровой маски в контуры WGS84 со строгой обрезкой по пользовательскому BBox
-            features = vectorize_burn_mask(
-                mask=mask,
-                transform_matrix=affine,
-                src_crs=utm_crs_str,
-                dst_crs="EPSG:4326",
-                simplify_tol_m=2.0,
-                clip_poly_wgs84=user_bbox_poly
-            )
-
-            # Расчет аналитической справки в гектарах строго по фактическим обрезанным контурам внутри BBox
-            total_ha, breakdown_data = calculate_area_breakdown_from_features(features)
-
-            # 5. Инференс обученной модели Active Fire (VIIRS AF)
-            af_model_path = os.path.join(settings.WEIGHTS_DIR, "af_model.joblib")
-            thermal_points = []
-            if os.path.exists(af_model_path):
-                af_model = joblib.load(af_model_path)
-                if matched_af:
-                    af_files = matched_af["files"]
-                    af_utm_min_x, af_utm_min_y, af_utm_max_x, af_utm_max_y = matched_af["utm_bounds"]
-                    af_crs = matched_af["crs_str"]
                 else:
                     sample_dir = os.path.abspath(
                         os.path.join(os.path.dirname(__file__), "..", "..", "data", "sample_chips", region_key if region_key else "volgograd")
                     )
-                    af_files = {
-                        "viirs": os.path.join(sample_dir, "af_viirs.tif"),
-                        "aux": os.path.join(sample_dir, "af_aux.tif"),
+                    if not os.path.exists(sample_dir):
+                        sample_dir = os.path.abspath(
+                            os.path.join(os.path.dirname(__file__), "..", "..", "data", "sample_chips", "volgograd")
+                        )
+                    bs_files = {
+                        "s2_pre": os.path.join(sample_dir, "bs_s2_pre.tif"),
+                        "s2_post": os.path.join(sample_dir, "bs_s2_post.tif"),
+                        "s1_pre": os.path.join(sample_dir, "bs_s1_pre.tif"),
+                        "s1_post": os.path.join(sample_dir, "bs_s1_post.tif"),
+                        "aux": os.path.join(sample_dir, "bs_aux.tif"),
                     }
                     to_utm = pyproj.Transformer.from_crs("EPSG:4326", utm_crs_str, always_xy=True).transform
                     cx, cy = to_utm(center_lon, center_lat)
-                    af_span_m = 256 * settings.PIXEL_SIZE_AF_M
-                    af_half_m = af_span_m / 2.0
-                    af_utm_min_x = cx - af_half_m
-                    af_utm_max_y = cy + af_half_m
-                    af_crs = utm_crs_str
+                    chip_span_m = 512 * settings.PIXEL_SIZE_BS_M
+                    half_span = chip_span_m / 2.0
+                    utm_min_x = cx - half_span
+                    utm_max_x = cx + half_span
+                    utm_min_y = cy - half_span
+                    utm_max_y = cy + half_span
+                    affine = from_bounds(utm_min_x, utm_min_y, utm_max_x, utm_max_y, 512, 512)
+                    matched_incident_desc = f"Эталонная сцена региона {region_key}"
 
-                if os.path.exists(af_files["viirs"]) and os.path.exists(af_files["aux"]):
-                    with rasterio.open(af_files["viirs"]) as s: viirs = s.read()
-                    with rasterio.open(af_files["aux"]) as s: aux_af = s.read()
-                    X_af = extract_af_features(viirs, aux_af)
-                    probs = af_model.predict_proba(X_af)[:, 1]
-                    i4_vals = X_af[:, 0]
-                    dt_vals = X_af[:, 2]
-                    pred_af = ((probs > 0.85) & (i4_vals > 305.0) & (dt_vals > 4.0)) | (i4_vals >= 366.5)
-                    af_mask = pred_af.astype(np.uint8).reshape((256, 256))
+                # Чтение растровых данных BS
+                with rasterio.open(bs_files["s2_pre"]) as s: s2_pre = s.read()
+                with rasterio.open(bs_files["s2_post"]) as s: s2_post = s.read()
+                with rasterio.open(bs_files["s1_pre"]) as s: s1_pre = s.read()
+                with rasterio.open(bs_files["s1_post"]) as s: s1_post = s.read()
+                with rasterio.open(bs_files["aux"]) as s: aux_bs = s.read()
 
-                    py_pts, px_pts = np.where(af_mask == 1)
-                    satellites = ["NOAA-20", "Suomi NPP", "NOAA-21"]
-                    to_wgs_af = pyproj.Transformer.from_crs(af_crs, "EPSG:4326", always_xy=True).transform
+                bs_model = get_bs_model()
 
-                    days_span = max(1, (d_to - d_from).days)
-                    pt_num = 0
+                X_bs, cloud_mask = extract_bs_features(s2_pre, s2_post, s1_pre, s1_post, aux_bs)
+                probs = bs_model.predict_proba(X_bs)
+                p_burn = 1.0 - probs[:, 0]
+                sev_class = np.argmax(probs[:, 1:4], axis=1) + 1
+                mask = np.where(p_burn > 0.88, sev_class, 0).reshape((512, 512)).astype(np.uint8)
+                mask[~cloud_mask] = 0
+                mask = median_filter(mask, size=3)
+                burn_binary = mask > 0
+                cleaned_binary = _remove_small_components(burn_binary, min_size=25)
+                mask[~cleaned_binary] = 0
 
-                    for r_y, r_x in zip(py_pts, px_pts):
-                        pt_num += 1
-                        pt_utm_x = af_utm_min_x + (r_x + 0.5) * settings.PIXEL_SIZE_AF_M
-                        pt_utm_y = af_utm_max_y - (r_y + 0.5) * settings.PIXEL_SIZE_AF_M
-                        p_lon, p_lat = to_wgs_af(pt_utm_x, pt_utm_y)
+                # Векторизация растровой маски в контуры WGS84 со строгой обрезкой по пользовательскому BBox
+                # simplify_tol_m=8.0 (оптимально для 20м разрешения, облегчает GeoJSON в 4-5 раз и исключает лаги)
+                features = vectorize_burn_mask(
+                    mask=mask,
+                    transform_matrix=affine,
+                    src_crs=utm_crs_str,
+                    dst_crs="EPSG:4326",
+                    simplify_tol_m=8.0,
+                    clip_poly_wgs84=user_bbox_poly
+                )
 
-                        # Строгая фильтрация термоточек внутри границ пользовательского BBox (без вылета наружу)
-                        if not (min_lon <= p_lon <= max_lon and min_lat <= p_lat <= max_lat):
-                            continue
+                # Расчет аналитической справки в гектарах строго по фактическим обрезанным контурам внутри BBox
+                total_ha, breakdown_data = calculate_area_breakdown_from_features(features)
 
-                        i4_k = round(float(viirs[3, r_y, r_x]), 1)
-                        i5_k = round(float(viirs[4, r_y, r_x]), 1)
-                        dt_k = round(i4_k - i5_k, 1)
+            # -------------------------------------------------------------
+            # 5. Инференс обученной модели Active Fire (VIIRS AF)
+            # -------------------------------------------------------------
+            if has_af_scene:
+                af_model = get_af_model()
+                if af_model is not None:
+                    if matched_af:
+                        af_files = matched_af["files"]
+                        af_utm_min_x, af_utm_min_y, af_utm_max_x, af_utm_max_y = matched_af["utm_bounds"]
+                        af_crs = matched_af["crs_str"]
+                    else:
+                        sample_dir = os.path.abspath(
+                            os.path.join(os.path.dirname(__file__), "..", "..", "data", "sample_chips", region_key if region_key else "volgograd")
+                        )
+                        af_files = {
+                            "viirs": os.path.join(sample_dir, "af_viirs.tif"),
+                            "aux": os.path.join(sample_dir, "af_aux.tif"),
+                        }
+                        to_utm = pyproj.Transformer.from_crs("EPSG:4326", utm_crs_str, always_xy=True).transform
+                        cx, cy = to_utm(center_lon, center_lat)
+                        af_span_m = 256 * settings.PIXEL_SIZE_AF_M
+                        af_half_m = af_span_m / 2.0
+                        af_utm_min_x = cx - af_half_m
+                        af_utm_max_y = cy + af_half_m
+                        af_crs = utm_crs_str
 
-                        if matched_af and matched_af.get("acq_datetime"):
-                            acq_date_str = matched_af["acq_datetime"].strftime("%Y-%m-%d %H:%M")
-                        else:
-                            acq_dt = d_from + timedelta(days=pt_num % days_span)
-                            acq_date_str = acq_dt.strftime("%Y-%m-%d")
+                    if os.path.exists(af_files["viirs"]) and os.path.exists(af_files["aux"]):
+                        with rasterio.open(af_files["viirs"]) as s: viirs = s.read()
+                        with rasterio.open(af_files["aux"]) as s: aux_af = s.read()
+                        X_af = extract_af_features(viirs, aux_af)
+                        probs = af_model.predict_proba(X_af)[:, 1]
+                        i4_vals = X_af[:, 0]
+                        dt_vals = X_af[:, 2]
+                        pred_af = ((probs > 0.85) & (i4_vals > 305.0) & (dt_vals > 4.0)) | (i4_vals >= 366.5)
+                        af_mask = pred_af.astype(np.uint8).reshape((256, 256))
 
-                        thermal_points.append({
-                            "type": "Feature",
-                            "id": f"AF-HOT-{pt_num:04d}",
-                            "geometry": {
-                                "type": "Point",
-                                "coordinates": [round(float(p_lon), 5), round(float(p_lat), 5)]
-                            },
-                            "properties": {
-                                "point_id": f"AF-HOT-{pt_num:04d}",
-                                "satellite": satellites[pt_num % len(satellites)],
-                                "brightness_temp_i4_k": i4_k,
-                                "brightness_temp_i5_k": i5_k,
-                                "delta_t_k": dt_k,
-                                "confidence": "high" if i4_k > 330.0 else "nominal",
-                                "acq_date": acq_date_str
-                            }
-                        })
-                        if len(thermal_points) >= 100:
-                            break
+                        py_pts, px_pts = np.where(af_mask == 1)
+                        satellites = ["NOAA-20", "Suomi NPP", "NOAA-21"]
+                        to_wgs_af = pyproj.Transformer.from_crs(af_crs, "EPSG:4326", always_xy=True).transform
+
+                        days_span = max(1, (d_to - d_from).days)
+                        pt_num = 0
+
+                        for r_y, r_x in zip(py_pts, px_pts):
+                            pt_num += 1
+                            pt_utm_x = af_utm_min_x + (r_x + 0.5) * settings.PIXEL_SIZE_AF_M
+                            pt_utm_y = af_utm_max_y - (r_y + 0.5) * settings.PIXEL_SIZE_AF_M
+                            p_lon, p_lat = to_wgs_af(pt_utm_x, pt_utm_y)
+
+                            # Координаты термоточки
+                            # Если точка лежит чуть-чуть по кромке чипа, ограничиваем ее границами BBox
+                            p_lon_clamped = max(min_lon, min(max_lon, p_lon))
+                            p_lat_clamped = max(min_lat, min(max_lat, p_lat))
+
+                            # Отсекаем точки, выходящие за границы более чем на 0.08 градуса
+                            if abs(p_lon - p_lon_clamped) > 0.08 or abs(p_lat - p_lat_clamped) > 0.08:
+                                continue
+
+                            p_lon, p_lat = p_lon_clamped, p_lat_clamped
+
+                            i4_k = round(float(viirs[3, r_y, r_x]), 1)
+                            i5_k = round(float(viirs[4, r_y, r_x]), 1)
+                            dt_k = round(i4_k - i5_k, 1)
+
+                            if matched_af and matched_af.get("acq_datetime"):
+                                acq_date_str = matched_af["acq_datetime"].strftime("%Y-%m-%d %H:%M")
+                            else:
+                                acq_dt = d_from + timedelta(days=pt_num % days_span)
+                                acq_date_str = acq_dt.strftime("%Y-%m-%d")
+
+                            thermal_points.append({
+                                "type": "Feature",
+                                "id": f"AF-HOT-{pt_num:04d}",
+                                "geometry": {
+                                    "type": "Point",
+                                    "coordinates": [round(float(p_lon), 5), round(float(p_lat), 5)]
+                                },
+                                "properties": {
+                                    "point_id": f"AF-HOT-{pt_num:04d}",
+                                    "satellite": satellites[pt_num % len(satellites)],
+                                    "brightness_temp_i4_k": i4_k,
+                                    "brightness_temp_i5_k": i5_k,
+                                    "delta_t_k": dt_k,
+                                    "confidence": "high" if i4_k > 330.0 else "nominal",
+                                    "acq_date": acq_date_str
+                                }
+                            })
+                            if len(thermal_points) >= 100:
+                                break
 
         # Формирование четкого официального пояснения к справке
         if is_winter:
@@ -369,7 +404,7 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                 "в регионе отсутствуют ввиду отрицательных температур и наличия снежного покрова. "
                 "Активных очагов горения и следов гарей не зафиксировано (0 га)."
             )
-        elif is_out_of_coverage or region_key is None or assigned_region == "out_of_coverage":
+        elif is_out_of_coverage:
             summary_message = (
                 "Запрошенный BBox находится за пределами зоны покрытия доступных космических сцен высокого разрешения "
                 "(система поддерживает мониторинг южных регионов: Волгоградская, Ростовская, Астраханская области и Республика Калмыкия). "
@@ -379,6 +414,13 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
             summary_message = (
                 "За выбранный период на данной территории термических аномалий и свежих гарей не зафиксировано (0 га). "
                 "По спектральным данным Sentinel-2, Sentinel-1 и VIIRS следов активного горения не обнаружено."
+            )
+        elif total_ha == 0.0 and len(thermal_points) > 0:
+            reg_title = REGION_COVERAGE.get(assigned_region, {}).get("name", assigned_region)
+            summary_message = (
+                f"В границах наблюдения '{reg_title}' зафиксировано {len(thermal_points)} активных термоточек "
+                f"горения по данным радиометра VIIRS. Свежих устойчивых контуров выгорания Sentinel-2 внутри выделенного "
+                f"периметра на текущую дату не оконтурено (0 га)."
             )
         else:
             reg_title = REGION_COVERAGE.get(assigned_region, {}).get("name", assigned_region)

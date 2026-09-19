@@ -5,7 +5,7 @@
 """
 import os
 import math
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
@@ -162,16 +162,30 @@ class ChipCatalog:
         center_lon: float,
         center_lat: float,
         target_date: Optional[date] = None,
-        max_days_diff: int = 20
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        buffer_days: int = 14
     ) -> Optional[Dict[str, Any]]:
         """
-        Строгий пространственно-временной поиск чипа BS:
+        Строгий пространственно-временной поиск чипа BS по интервалу дат:
         1. Чип ОБЯЗАН пространственно пересекаться с выбранным BBox пользователя.
-        2. Дата съемки чипа (date_post) ОБЯЗАНА находиться в пределах окна target_date ± max_days_diff дней (по умолчанию 20 дней).
-        Если снимок в это время и в этом месте не зафиксирован — возвращается None (пожара нет).
+        2. Дата съемки чипа (date_post или date_pre) должна попадать в запрашиваемый
+           диапазон [date_from, date_to] (с буфером buffer_days до и после).
+        3. Если пожар произошел внутри интервала, days_diff = 0 (идеальное попадание).
         """
         if not self.bs_chips:
             return None
+
+        # Определяем границы интервала
+        if date_from is not None or date_to is not None:
+            eff_from = date_from if date_from is not None else date_to
+            eff_to = date_to if date_to is not None else date_from
+        elif target_date is not None:
+            eff_from = target_date
+            eff_to = target_date
+        else:
+            eff_from = None
+            eff_to = None
 
         candidates = []
         for chip in self.bs_chips:
@@ -181,11 +195,19 @@ class ChipCatalog:
 
             inter_area = user_bbox_poly.intersection(chip["poly_wgs"]).area
 
-            # 2. Строгая проверка временного диапазона
-            if target_date and chip["date_post"]:
-                days_diff = abs((chip["date_post"] - target_date).days)
-                if days_diff > max_days_diff:
-                    # Дата за пределами допустимого окна — пропускаем
+            # 2. Проверка попадания в диапазон дат
+            chip_date = chip["date_post"] or chip["date_pre"]
+            if eff_from and eff_to and chip_date:
+                if chip_date < eff_from:
+                    days_diff = (eff_from - chip_date).days
+                elif chip_date > eff_to:
+                    days_diff = (chip_date - eff_to).days
+                else:
+                    # Дата съемки находится прямо ВНУТРИ диапазона дат пользователя!
+                    days_diff = 0
+
+                # Отсекаем снимки за пределами допустимого буфера
+                if days_diff > buffer_days:
                     continue
             else:
                 days_diff = 0
@@ -199,8 +221,9 @@ class ChipCatalog:
         if not candidates:
             return None
 
-        # Сортировка: максимальное пересечение полигона, затем минимальная разница дат
-        candidates.sort(key=lambda x: (-x["inter_area"], x["days_diff"]))
+        # Сортировка: минимальное расстояние до интервала (0 для внутри диапазона),
+        # затем максимальная площадь пересечения полигона
+        candidates.sort(key=lambda x: (x["days_diff"], -x["inter_area"]))
         return candidates[0]["chip"]
 
     def find_matching_af_chip(
@@ -209,36 +232,67 @@ class ChipCatalog:
         center_lon: float,
         center_lat: float,
         target_date: Optional[date] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
         bs_chip_bbox_poly: Optional[Polygon] = None,
-        max_days_diff: int = 15
+        bs_chip_date: Optional[date] = None,
+        buffer_days: int = 14
     ) -> Optional[Dict[str, Any]]:
         """
-        Строгий подбор чипа термоточек AF:
+        Строгий подбор чипа термоточек AF по интервалу дат:
         1. Должен пространственно перекрывать BBox пользователя (и контур гари BS, если задан).
-        2. Дата пролета VIIRS должна быть в пределах target_date ± max_days_diff дней (не более 15 дней).
+        2. Дата пролета VIIRS должна быть синхронизирована с датой пожара (bs_chip_date ± 15 дней)
+           и попадать в диапазон дат [date_from, date_to] (с буфером buffer_days).
         3. Чип должен содержать подтвержденное горение (n_fire_px > 0).
         """
         if not self.af_chips:
             return None
 
+        if date_from is not None or date_to is not None:
+            eff_from = date_from if date_from is not None else date_to
+            eff_to = date_to if date_to is not None else date_from
+        elif target_date is not None:
+            eff_from = target_date
+            eff_to = target_date
+        else:
+            eff_from = None
+            eff_to = None
+
         candidates = []
         for chip in self.af_chips:
-            # 1. Проверка пересечения с BBox
-            if not user_bbox_poly.intersects(chip["poly_wgs"]):
+            # Чип AF обязан содержать активное горение
+            if chip.get("n_fire_px", 0) <= 0:
                 continue
 
-            # Если передан BBox найденной гари — чип VIIRS должен пересекать именно зону пожара
-            if bs_chip_bbox_poly is not None and not bs_chip_bbox_poly.intersects(chip["poly_wgs"]):
+            # 1. Проверка пересечения с BBox пользователя
+            if not user_bbox_poly.intersects(chip["poly_wgs"]):
                 continue
 
             inter_area = user_bbox_poly.intersection(chip["poly_wgs"]).area
 
-            # 2. Временное окно
-            if target_date and chip["acq_datetime"]:
+            # Пересечение с найденным контуром гари (если он есть) — приоритетный бонус, но не жесткий отказ
+            overlaps_bs = bool(bs_chip_bbox_poly is not None and bs_chip_bbox_poly.intersects(chip["poly_wgs"]))
+
+            # 2. Временная синхронизация
+            if chip["acq_datetime"]:
                 chip_d = chip["acq_datetime"].date()
-                days_diff = abs((chip_d - target_date).days)
-                if days_diff > max_days_diff:
-                    continue
+                if bs_chip_date:
+                    scar_diff = abs((chip_d - bs_chip_date).days)
+                else:
+                    scar_diff = 0
+
+                if eff_from and eff_to:
+                    if chip_d < eff_from:
+                        days_diff = (eff_from - chip_d).days
+                    elif chip_d > eff_to:
+                        days_diff = (chip_d - eff_to).days
+                    else:
+                        days_diff = 0
+
+                    if days_diff > buffer_days:
+                        continue
+                else:
+                    days_diff = 0
             else:
                 days_diff = 0
 
@@ -246,14 +300,17 @@ class ChipCatalog:
                 "chip": chip,
                 "inter_area": inter_area,
                 "days_diff": days_diff,
-                "has_fire": chip["n_fire_px"] > 0
+                "scar_diff": scar_diff,
+                "has_fire": chip["n_fire_px"] > 0,
+                "overlaps_bs": overlaps_bs
             })
 
         if not candidates:
             return None
 
-        # Приоритет: наличие пламени, минимальная разница по дате с пожаром, максимальное перекрытие
-        candidates.sort(key=lambda x: (not x["has_fire"], x["days_diff"], -x["inter_area"]))
+        # Приоритет: наличие пламени, попадание в интервал дат пользователя (days_diff == 0),
+        # пересечение с контуром гари (если он есть), минимальная разница по времени с гарью, максимальное перекрытие
+        candidates.sort(key=lambda x: (not x["has_fire"], x["days_diff"], not x["overlaps_bs"], x["scar_diff"], -x["inter_area"]))
         return candidates[0]["chip"]
 
     def get_featured_presets(self) -> List[Dict[str, Any]]:
