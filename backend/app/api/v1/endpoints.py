@@ -13,6 +13,7 @@ from rasterio.transform import from_bounds
 from fastapi import APIRouter, HTTPException, BackgroundTasks, status
 from fastapi.responses import FileResponse, JSONResponse
 import pyproj
+import joblib
 from scipy.ndimage import median_filter, label
 from typing import Any, Optional, Dict, List
 
@@ -329,6 +330,11 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
         max_dnbr_val = direct_scene_meta.get("max_dnbr", 0.45) if direct_scene_meta else (0.45 if total_ha > 0 else 0.02)
         date_pre_val = direct_scene_meta.get("date_pre", req.date_from) if direct_scene_meta else req.date_from
         date_post_val = direct_scene_meta.get("date_post", req.date_to) if direct_scene_meta else req.date_to
+
+        if total_ha > 0:
+            summary_message = f"Обнаружена выгоревшая площадь {total_ha:.1f} га, зафиксировано {len(thermal_points)} термоточек."
+        else:
+            summary_message = f"Активных очагов и свежих гарей в указанный период не зафиксировано (0.0 га)."
 
         report_data = {
             "task_id": task_id,
