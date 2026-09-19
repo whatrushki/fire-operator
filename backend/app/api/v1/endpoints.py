@@ -590,6 +590,41 @@ def export_analytical_report_file(task_id: str):
 
 
 @router.get(
+    "/export/pdf",
+    summary="Выгрузка научно-методического отчета о космическом мониторинге (PDF)",
+    tags=["Аналитическая отчётность (Reports)"],
+)
+def export_scientific_report_pdf():
+    """Возвращает официальный научно-аналитический отчёт по методологии ДЗЗ, термодинамическим моделям и валидации."""
+    report_pdf_path = os.path.abspath(os.path.join(settings.PROJECT_ROOT, "REPORT.pdf"))
+    if not os.path.exists(report_pdf_path):
+        alt_path = os.path.abspath(os.path.join(settings.PROJECT_ROOT, "reports", "Fire_Operator_Scientific_Report.pdf"))
+        if os.path.exists(alt_path):
+            report_pdf_path = alt_path
+        else:
+            raise HTTPException(status_code=404, detail="Файл научного отчета (REPORT.pdf) не найден на сервере")
+    return FileResponse(
+        path=report_pdf_path,
+        media_type="application/pdf",
+        filename="Fire_Operator_Scientific_Report.pdf"
+    )
+
+
+@router.get(
+    "/export/pdf/{task_id}",
+    summary="Выгрузка научно-методического отчета для конкретной задачи (PDF)",
+    tags=["Аналитическая отчётность (Reports)"],
+)
+def export_task_report_pdf(task_id: str):
+    """Выгружает официальный научно-аналитический отчет в формате PDF."""
+    validate_task_id(task_id)
+    t = load_task_meta(task_id)
+    if not t:
+        raise HTTPException(status_code=404, detail=f"Задача '{task_id}' не найдена")
+    return export_scientific_report_pdf()
+
+
+@router.get(
     "/health",
     response_model=HealthResponse,
     summary="Диагностика работоспособности и доступности моделей",

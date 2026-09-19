@@ -448,6 +448,9 @@
           <a id="link-shp" href="#" class="btn-export btn-shp" download>📦 Shapefile</a>
           <a id="link-report" href="#" class="btn-export btn-report" download>📄 Справка (JSON)</a>
         </div>
+        <div style="margin-top: 8px;">
+          <a id="link-pdf" href="/api/v1/export/pdf" target="_blank" class="btn-export" style="display: block; background: #2563eb; color: #ffffff; text-align: center; border: 1px solid #1d4ed8; padding: 9px; font-weight: 600; border-radius: 6px; text-decoration: none;">📑 Научный отчёт (PDF)</a>
+        </div>
       </div>
     </div>
 
@@ -714,6 +717,7 @@
         document.getElementById('link-geojson').href = `/api/v1/export/geojson/${taskId}`;
         document.getElementById('link-shp').href = `/api/v1/export/shapefile/${taskId}`;
         document.getElementById('link-report').href = `/api/v1/export/report/${taskId}`;
+        document.getElementById('link-pdf').href = `/api/v1/export/pdf/${taskId}`;
 
         statusBanner.style.display = 'none';
         reportCard.style.display = 'block';
