@@ -136,7 +136,7 @@ export function App() {
       setActiveTaskId(initResp.task_id);
 
       // 2. Poll until task status is completed
-      await fireApi.pollTask(initResp.task_id, 40, 600, (prog) => {
+      await fireApi.pollTask(initResp.task_id, 90, 1000, (prog) => {
         setAnalysisProgress(prog);
       });
 

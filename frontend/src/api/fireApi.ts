@@ -143,8 +143,8 @@ export const fireApi = {
   // 4. Poll task until completed
   async pollTask(
     taskId: string,
-    maxAttempts = 40,
-    delayMs = 600,
+    maxAttempts = 90,
+    delayMs = 1000,
     onProgress?: (progress: number) => void
   ): Promise<TaskStatusResponse> {
     for (let i = 0; i < maxAttempts; i++) {

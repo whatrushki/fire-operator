@@ -158,6 +158,38 @@ export const CosmoMap25D: React.FC<CosmoMap25DProps> = ({
     }
   }, [selectedZone]);
 
+  // Synchronize map camera when a contour or thermal point is selected
+  useEffect(() => {
+    if (selectedFeature && selectedFeature.geometry) {
+      const geom = selectedFeature.geometry;
+      let centerLon = 0;
+      let centerLat = 0;
+      if (geom.type === 'Point' && Array.isArray(geom.coordinates)) {
+        centerLon = geom.coordinates[0];
+        centerLat = geom.coordinates[1];
+      } else if (geom.type === 'Polygon' && Array.isArray(geom.coordinates) && geom.coordinates[0]?.length) {
+        const ring = geom.coordinates[0];
+        const sum = ring.reduce((acc: [number, number], p: [number, number]) => [acc[0] + p[0], acc[1] + p[1]], [0, 0]);
+        centerLon = sum[0] / ring.length;
+        centerLat = sum[1] / ring.length;
+      } else if (geom.type === 'MultiPolygon' && Array.isArray(geom.coordinates) && geom.coordinates[0]?.[0]?.length) {
+        const ring = geom.coordinates[0][0];
+        const sum = ring.reduce((acc: [number, number], p: [number, number]) => [acc[0] + p[0], acc[1] + p[1]], [0, 0]);
+        centerLon = sum[0] / ring.length;
+        centerLat = sum[1] / ring.length;
+      }
+      if (centerLon && centerLat) {
+        setViewState((prev) => ({
+          ...prev,
+          longitude: centerLon,
+          latitude: centerLat,
+          zoom: Math.max(prev.zoom, 13.5),
+          transitionDuration: 800,
+        }));
+      }
+    }
+  }, [selectedFeature]);
+
   // Handle map click: either adds drawing points or selects features
   const handleMapClick = useCallback(
     (info: any) => {

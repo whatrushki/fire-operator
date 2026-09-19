@@ -43,7 +43,8 @@ from app.services.geo_service import (
 from app.services.export_service import export_geojson, export_shapefile_zip
 from app.services.live_satellite_service import (
     query_sentinel2_stac_scenes,
-    get_live_viirs_hotspots
+    get_live_viirs_hotspots,
+    process_live_sentinel2_on_demand
 )
 from app.services.satellite_catalog import satellite_catalog
 
@@ -185,7 +186,7 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                 assigned_region = f"Спутниковый мониторинг ({len(bs_matches)} сцен ДЗЗ)"
                 active_period = f"{bs_matches[0].get('date_pre', req.date_from)} — {bs_matches[0].get('date_post', req.date_to)}"
             else:
-                # Прямого пересечения нет — ищем ближайшую сцену в каталоге
+                # Прямого пересечения с локальными чипами нет — запрашиваем реальный Sentinel-2 L2A STAC COG on-demand
                 nearest_bs = satellite_catalog.find_nearest_bs_scene(user_poly_wgs84)
                 if nearest_bs:
                     nearest_scene_meta = {
@@ -194,16 +195,16 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                         "date_pre": nearest_bs["date_pre"],
                         "date_post": nearest_bs["date_post"]
                     }
-                    # Если полигон находится в пределах 35 км от спутниковой сцены (например, Ростов/Щепкинский лес)
-                    if nearest_bs["distance_km"] <= 35.0 and bs_model:
-                        s = nearest_bs["scene"]
-                        f_list, ha, b_data = satellite_catalog.run_bs_inference(s, bs_model, clip_poly_wgs84=None)
-                        features.extend(f_list)
-                        total_ha = ha
-                        breakdown_data = b_data
-                        assigned_region = f"Ростовская агломерация (смежный пролёт Sentinel-2 {nearest_bs['chip_id']}, {nearest_bs['distance_km']} км)"
-                        active_period = f"{s.get('date_pre', req.date_from)} — {s.get('date_post', req.date_to)}"
-                        model_bs = f"Sentinel-2 L2A ({nearest_bs['chip_id']}, {nearest_bs['distance_km']} км к ЮВ)"
+
+                live_res = process_live_sentinel2_on_demand(user_poly_wgs84, req.date_from, req.date_to)
+                if live_res is not None:
+                    l_feats, l_ha, l_bd, l_meta = live_res
+                    features.extend(l_feats)
+                    total_ha = l_ha
+                    breakdown_data = l_bd
+                    assigned_region = f"Sentinel-2 L2A ({l_meta.get('scene_id', 'STAC COG')})"
+                    active_period = f"{l_meta.get('date_pre', req.date_from)} — {l_meta.get('date_post', req.date_to)}"
+                    model_bs = f"Sentinel-2 L2A COG (AWS Open Data dNBR, Cloud: {round(l_meta.get('cloud_cover', 0), 1)}%)"
 
             # 2. Поиск реальных чипов VIIRS AF в каталоге
             af_matches = satellite_catalog.query_af_scenes(user_poly_wgs84, req.date_from, req.date_to, max_scenes=3)
