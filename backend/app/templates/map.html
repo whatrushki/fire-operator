@@ -407,10 +407,10 @@
           <select id="region-select">
             <optgroup label="🔥 Реальные инциденты из базы Sentinel-2/1:">
               <option value="volgograd_huge_2022" selected>Волгоград — Заволжье (авг 2022, 3350 га)</option>
-              <option value="astrakhan_max_2022">Астрахань — Каспий (июль 2022, 5878 га)</option>
-              <option value="rostov_salsk_2019">Ростовская обл. — Сальск (авг 2019, 4291 га)</option>
-              <option value="volgograd_north_2020">Волгоград — Север (июль 2020, 3596 га)</option>
-              <option value="kalmykia_border_2024">Калмыкия — Юг (июль 2024, 3813 га)</option>
+              <option value="astrakhan_max_2019">Астрахань — Волго-Ахтуба (июнь 2019, 2306 га)</option>
+              <option value="rostov_salsk_2022">Ростовская обл. — Сальск (авг 2022, 1694 га)</option>
+              <option value="volgograd_north_2019">Волгоград — Север (июнь 2019, 2487 га)</option>
+              <option value="kalmykia_south_2024">Калмыкия — Южный рубеж (сент 2024, 1759 га)</option>
             </optgroup>
             <optgroup label="📍 Обзорные регионы Юга России:">
               <option value="volgograd">Волгоградская область (Цимлянское вдхр.)</option>
@@ -571,10 +571,10 @@
     const REGION_DATA = {
       // Крупные реальные пожары из базы Sentinel-2/1:
       volgograd_huge_2022: { bbox: [46.12, 49.50, 46.34, 49.68], from: "2022-08-10", to: "2022-08-28" },
-      astrakhan_max_2022: { bbox: [47.05, 48.00, 47.26, 48.20], from: "2022-06-20", to: "2022-07-10" },
-      rostov_salsk_2019: { bbox: [41.36, 45.98, 41.58, 46.16], from: "2019-08-15", to: "2019-09-01" },
-      volgograd_north_2020: { bbox: [42.84, 49.86, 43.06, 50.04], from: "2020-07-01", to: "2020-07-15" },
-      kalmykia_border_2024: { bbox: [41.91, 46.33, 42.14, 46.52], from: "2024-07-05", to: "2024-07-22" },
+      astrakhan_max_2019: { bbox: [46.50, 48.20, 46.72, 48.38], from: "2019-06-15", to: "2019-06-28" },
+      rostov_salsk_2022: { bbox: [42.55, 47.00, 42.77, 47.18], from: "2022-07-30", to: "2022-08-16" },
+      volgograd_north_2019: { bbox: [47.07, 48.66, 47.30, 48.83], from: "2019-06-12", to: "2019-06-27" },
+      kalmykia_south_2024: { bbox: [39.25, 47.94, 39.48, 48.12], from: "2024-09-18", to: "2024-10-05" },
 
       // Базовые регионы Юга России:
       volgograd: { bbox: [43.6, 47.7, 44.7, 48.5], from: "2024-04-15", to: "2024-05-15" },

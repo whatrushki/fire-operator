@@ -114,3 +114,48 @@ def test_real_fire_query():
     assert rep['total_burned_area_ha'] > 0.0
     assert rep['active_thermal_anomalies_count'] > 0
     assert "выявлено" in rep['summary_message']
+
+def test_strict_date_no_fire():
+    r = client.post('/api/v1/analyze', json={
+        'date_from': '2021-05-01',
+        'date_to': '2021-05-15',
+        'bbox': [46.12, 49.50, 46.34, 49.68],
+        'region': 'custom'
+    })
+    assert r.status_code == 202
+    task_id = r.json()['task_id']
+    
+    for _ in range(15):
+        st = client.get(f'/api/v1/tasks/{task_id}').json()
+        if st['status'] == 'completed':
+            break
+        time.sleep(0.4)
+
+    rep_resp = client.get(f'/api/v1/report/{task_id}')
+    assert rep_resp.status_code == 200
+    rep = rep_resp.json()
+    assert rep['total_burned_area_ha'] == 0.0
+    assert rep['active_thermal_anomalies_count'] == 0
+    assert "не зафиксировано" in rep['summary_message']
+
+def test_synchronized_preset_fire():
+    r = client.post('/api/v1/analyze', json={
+        'date_from': '2022-08-10',
+        'date_to': '2022-08-28',
+        'bbox': [46.12, 49.50, 46.34, 49.68]
+    })
+    assert r.status_code == 202
+    task_id = r.json()['task_id']
+    
+    for _ in range(15):
+        st = client.get(f'/api/v1/tasks/{task_id}').json()
+        if st['status'] == 'completed':
+            break
+        time.sleep(0.4)
+
+    rep_resp = client.get(f'/api/v1/report/{task_id}')
+    assert rep_resp.status_code == 200
+    rep = rep_resp.json()
+    assert rep['total_burned_area_ha'] > 0.0
+    assert rep['active_thermal_anomalies_count'] > 0
+

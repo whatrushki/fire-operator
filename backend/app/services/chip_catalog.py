@@ -161,115 +161,100 @@ class ChipCatalog:
         user_bbox_poly: Polygon,
         center_lon: float,
         center_lat: float,
-        target_date: Optional[date] = None
+        target_date: Optional[date] = None,
+        max_days_diff: int = 20
     ) -> Optional[Dict[str, Any]]:
         """
-        Пространственно-временной поиск наиболее подходящего чипа BS.
-        Сначала отбираются чипы, пересекающие BBox пользователя.
-        Если пересечений несколько или нет прямых пересечений — ранжирование по расстоянию и близости к целевой дате.
+        Строгий пространственно-временной поиск чипа BS:
+        1. Чип ОБЯЗАН пространственно пересекаться с выбранным BBox пользователя.
+        2. Дата съемки чипа (date_post) ОБЯЗАНА находиться в пределах окна target_date ± max_days_diff дней (по умолчанию 20 дней).
+        Если снимок в это время и в этом месте не зафиксирован — возвращается None (пожара нет).
         """
         if not self.bs_chips:
             return None
 
         candidates = []
         for chip in self.bs_chips:
-            # 1. Пространственная метрика
-            intersects = user_bbox_poly.intersects(chip["poly_wgs"])
-            if intersects:
-                inter_area = user_bbox_poly.intersection(chip["poly_wgs"]).area
-                spatial_dist_deg = 0.0
-            else:
-                inter_area = 0.0
-                dx = center_lon - chip["center_lon"]
-                dy = center_lat - chip["center_lat"]
-                spatial_dist_deg = math.sqrt(dx * dx + dy * dy)
+            # 1. Строгая проверка пространственного пересечения
+            if not user_bbox_poly.intersects(chip["poly_wgs"]):
+                continue
 
-            # 2. Временная метрика
+            inter_area = user_bbox_poly.intersection(chip["poly_wgs"]).area
+
+            # 2. Строгая проверка временного диапазона
             if target_date and chip["date_post"]:
                 days_diff = abs((chip["date_post"] - target_date).days)
+                if days_diff > max_days_diff:
+                    # Дата за пределами допустимого окна — пропускаем
+                    continue
             else:
-                days_diff = 100.0
+                days_diff = 0
 
             candidates.append({
                 "chip": chip,
-                "intersects": intersects,
                 "inter_area": inter_area,
-                "spatial_dist_deg": spatial_dist_deg,
                 "days_diff": days_diff
             })
 
-        # Приоритет: пересекающиеся с BBox
-        intersecting = [c for c in candidates if c["intersects"]]
-        if intersecting:
-            # Сортировка: максимальное пересечение, затем минимальная разница дат
-            intersecting.sort(key=lambda x: (-x["inter_area"], x["days_diff"]))
-            return intersecting[0]["chip"]
+        if not candidates:
+            return None
 
-        # Если прямого пересечения нет, но пользователь навел в радиусе 1.5 градусов (~150 км)
-        candidates.sort(key=lambda x: (x["spatial_dist_deg"], x["days_diff"]))
-        best_nearby = candidates[0]
-        if best_nearby["spatial_dist_deg"] <= 1.5:
-            return best_nearby["chip"]
-
-        return None
+        # Сортировка: максимальное пересечение полигона, затем минимальная разница дат
+        candidates.sort(key=lambda x: (-x["inter_area"], x["days_diff"]))
+        return candidates[0]["chip"]
 
     def find_matching_af_chip(
         self,
         user_bbox_poly: Polygon,
         center_lon: float,
         center_lat: float,
-        target_date: Optional[date] = None
+        target_date: Optional[date] = None,
+        bs_chip_bbox_poly: Optional[Polygon] = None,
+        max_days_diff: int = 15
     ) -> Optional[Dict[str, Any]]:
-        """Поиск подходящего AF чипа по BBox и дате."""
+        """
+        Строгий подбор чипа термоточек AF:
+        1. Должен пространственно перекрывать BBox пользователя (и контур гари BS, если задан).
+        2. Дата пролета VIIRS должна быть в пределах target_date ± max_days_diff дней (не более 15 дней).
+        3. Чип должен содержать подтвержденное горение (n_fire_px > 0).
+        """
         if not self.af_chips:
             return None
 
         candidates = []
         for chip in self.af_chips:
-            intersects = user_bbox_poly.intersects(chip["poly_wgs"])
-            if intersects:
-                inter_area = user_bbox_poly.intersection(chip["poly_wgs"]).area
-                spatial_dist_deg = 0.0
-            else:
-                inter_area = 0.0
-                dx = center_lon - chip["center_lon"]
-                dy = center_lat - chip["center_lat"]
-                spatial_dist_deg = math.sqrt(dx * dx + dy * dy)
+            # 1. Проверка пересечения с BBox
+            if not user_bbox_poly.intersects(chip["poly_wgs"]):
+                continue
 
+            # Если передан BBox найденной гари — чип VIIRS должен пересекать именно зону пожара
+            if bs_chip_bbox_poly is not None and not bs_chip_bbox_poly.intersects(chip["poly_wgs"]):
+                continue
+
+            inter_area = user_bbox_poly.intersection(chip["poly_wgs"]).area
+
+            # 2. Временное окно
             if target_date and chip["acq_datetime"]:
                 chip_d = chip["acq_datetime"].date()
                 days_diff = abs((chip_d - target_date).days)
+                if days_diff > max_days_diff:
+                    continue
             else:
-                days_diff = 100.0
+                days_diff = 0
 
             candidates.append({
                 "chip": chip,
-                "intersects": intersects,
                 "inter_area": inter_area,
-                "spatial_dist_deg": spatial_dist_deg,
-                "days_diff": days_diff
+                "days_diff": days_diff,
+                "has_fire": chip["n_fire_px"] > 0
             })
 
-        intersecting = [c for c in candidates if c["intersects"]]
-        if intersecting:
-            with_fire = [c for c in intersecting if c["chip"]["n_fire_px"] > 0]
-            if with_fire:
-                with_fire.sort(key=lambda x: (x["days_diff"], -x["inter_area"]))
-                return with_fire[0]["chip"]
-            intersecting.sort(key=lambda x: (x["days_diff"], -x["inter_area"]))
-            return intersecting[0]["chip"]
+        if not candidates:
+            return None
 
-        # Если прямого пересечения нет, но ищем пожар в окрестности
-        with_fire_all = [c for c in candidates if c["chip"]["n_fire_px"] > 0 and c["spatial_dist_deg"] <= 1.5]
-        if with_fire_all:
-            with_fire_all.sort(key=lambda x: (x["spatial_dist_deg"], x["days_diff"]))
-            return with_fire_all[0]["chip"]
-
-        candidates.sort(key=lambda x: (x["spatial_dist_deg"], x["days_diff"]))
-        if candidates[0]["spatial_dist_deg"] <= 2.0:
-            return candidates[0]["chip"]
-
-        return None
+        # Приоритет: наличие пламени, минимальная разница по дате с пожаром, максимальное перекрытие
+        candidates.sort(key=lambda x: (not x["has_fire"], x["days_diff"], -x["inter_area"]))
+        return candidates[0]["chip"]
 
     def get_featured_presets(self) -> List[Dict[str, Any]]:
         """
@@ -279,53 +264,58 @@ class ChipCatalog:
         presets = [
             {
                 "id": "volgograd_huge_2022",
-                "name": "Волгоград (август 2022, 3350 га)",
+                "name": "Волгоград — Заволжье (август 2022, 3350 га)",
                 "chip_id": "BS_tr_000109",
+                "af_chip_id": "AF_tr_000250",
                 "bbox": [46.12, 49.50, 46.34, 49.68],
                 "date_from": "2022-08-10",
                 "date_to": "2022-08-28",
                 "event_id": "FE13548",
-                "desc": "Крупный степной пожар в Заволжье (Палласовский р-н)"
+                "desc": "Степной пожар в Заволжье: 54 термоточки строго внутри контура гари"
             },
             {
-                "id": "astrakhan_max_2022",
-                "name": "Астрахань / Каспий (июль 2022, 5878 га)",
-                "chip_id": "BS_tr_000095",
-                "bbox": [47.05, 48.00, 47.26, 48.20],
-                "date_from": "2022-06-20",
-                "date_to": "2022-07-10",
-                "event_id": "FE12837",
-                "desc": "Рекордная по площади гарь в полупустынной зоне"
+                "id": "astrakhan_max_2019",
+                "name": "Астрахань — Волго-Ахтуба (июнь 2019, 2306 га)",
+                "chip_id": "BS_tr_000004",
+                "af_chip_id": "AF_tr_000023",
+                "bbox": [46.50, 48.20, 46.72, 48.38],
+                "date_from": "2019-06-15",
+                "date_to": "2019-06-28",
+                "event_id": "FE00977",
+                "desc": "Масштабный пал пойменной растительности с активным огнем"
             },
             {
-                "id": "rostov_salsk_2019",
-                "name": "Ростовская обл. (август 2019, 4291 га)",
-                "chip_id": "BS_tr_000006",
-                "bbox": [41.36, 45.98, 41.58, 46.16],
-                "date_from": "2019-08-15",
-                "date_to": "2019-09-01",
-                "event_id": "FE02117",
-                "desc": "Масштабный пал суходольной растительности (Сальский р-н)"
+                "id": "rostov_salsk_2022",
+                "name": "Ростовская обл. — Сальск (август 2022, 1694 га)",
+                "chip_id": "BS_tr_000101",
+                "af_chip_id": "AF_tr_000238",
+                "bbox": [42.55, 47.00, 42.77, 47.18],
+                "date_from": "2022-07-30",
+                "date_to": "2022-08-16",
+                "event_id": "FE13054",
+                "desc": "Степной пожар: 40 термоточек VIIRS внутри контура"
             },
             {
-                "id": "volgograd_north_2020",
-                "name": "Волгоград / Север (июль 2020, 3596 га)",
-                "chip_id": "BS_tr_000024",
-                "bbox": [42.84, 49.86, 43.06, 50.04],
-                "date_from": "2020-07-01",
-                "date_to": "2020-07-15",
-                "event_id": "FE05085",
-                "desc": "Смешанный пожар в пойме реки Медведица"
+                "id": "volgograd_north_2019",
+                "name": "Волгоград — Север (июнь 2019, 2487 га)",
+                "chip_id": "BS_tr_000003",
+                "af_chip_id": "AF_tr_000019",
+                "bbox": [47.07, 48.66, 47.30, 48.83],
+                "date_from": "2019-06-12",
+                "date_to": "2019-06-27",
+                "event_id": "FE01122",
+                "desc": "Крупный пожар: 34 термоточки VIIRS точно внутри гари"
             },
             {
-                "id": "kalmykia_border_2024",
-                "name": "Калмыкия / Юг (июль 2024, 3813 га)",
-                "chip_id": "BS_tr_000221",
-                "bbox": [41.91, 46.33, 42.14, 46.52],
-                "date_from": "2024-07-05",
-                "date_to": "2024-07-22",
-                "event_id": "FE31014",
-                "desc": "Свежий крупный пожар пожароопасного сезона 2024 года"
+                "id": "kalmykia_south_2024",
+                "name": "Калмыкия — Южный рубеж (сентябрь 2024, 1759 га)",
+                "chip_id": "BS_tr_000202",
+                "af_chip_id": "AF_tr_000412",
+                "bbox": [39.25, 47.94, 39.48, 48.12],
+                "date_from": "2024-09-18",
+                "date_to": "2024-10-05",
+                "event_id": "FE24108",
+                "desc": "Свежий осенний пожар сезона 2024 года (28 термоточек)"
             }
         ]
         return presets

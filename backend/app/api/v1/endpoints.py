@@ -123,22 +123,22 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
         # Расширены до административных границ районов наблюдения
         REGION_COVERAGE = {
             "volgograd": {
-                "box": shapely_box(43.00, 47.50, 45.80, 49.00),
+                "box": shapely_box(41.50, 47.50, 48.00, 51.30),
                 "name": "Волгоградская область",
                 "center": (44.50, 48.30)
             },
             "kalmykia": {
-                "box": shapely_box(43.50, 45.00, 46.00, 47.00),
+                "box": shapely_box(41.50, 44.80, 47.80, 48.50),
                 "name": "Республика Калмыкия",
                 "center": (44.70, 46.00)
             },
             "rostov": {
-                "box": shapely_box(40.00, 46.20, 43.50, 48.20),
+                "box": shapely_box(38.20, 45.80, 44.50, 50.30),
                 "name": "Ростовская область",
                 "center": (41.50, 47.50)
             },
             "astrakhan": {
-                "box": shapely_box(46.00, 46.50, 48.50, 48.50),
+                "box": shapely_box(45.50, 45.50, 49.30, 49.00),
                 "name": "Астраханская область",
                 "center": (47.40, 47.40)
             },
@@ -185,11 +185,16 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                 user_bbox_poly=user_bbox_poly,
                 center_lon=center_lon,
                 center_lat=center_lat,
-                target_date=d_to.date()
+                target_date=d_to.date(),
+                bs_chip_bbox_poly=matched_bs["poly_wgs"] if matched_bs else None
             )
 
-        # Если BBox находится за пределами зоны доступных спутниковых снимков или зимний период:
-        if is_winter or (region_key is None and matched_bs is None):
+        is_out_of_coverage = (region_key is None and matched_bs is None)
+        is_explicit_sample_region = bool(req.region and req.region.lower() in ["volgograd", "kalmykia", "rostov", "astrakhan"])
+        is_no_fire = (matched_bs is None) and not is_explicit_sample_region
+
+        # Если BBox находится за пределами зоны доступных спутниковых снимков, зимний период или пожаров в эти даты нет:
+        if is_winter or is_out_of_coverage or is_no_fire:
             mask = np.zeros((512, 512), dtype=np.uint8)
             features = []
             thermal_points = []
@@ -331,7 +336,11 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                         i5_k = round(float(viirs[4, r_y, r_x]), 1)
                         dt_k = round(i4_k - i5_k, 1)
 
-                        acq_dt = d_from + timedelta(days=pt_num % days_span)
+                        if matched_af and matched_af.get("acq_datetime"):
+                            acq_date_str = matched_af["acq_datetime"].strftime("%Y-%m-%d %H:%M")
+                        else:
+                            acq_dt = d_from + timedelta(days=pt_num % days_span)
+                            acq_date_str = acq_dt.strftime("%Y-%m-%d")
 
                         thermal_points.append({
                             "type": "Feature",
@@ -347,7 +356,7 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                                 "brightness_temp_i5_k": i5_k,
                                 "delta_t_k": dt_k,
                                 "confidence": "high" if i4_k > 330.0 else "nominal",
-                                "acq_date": acq_dt.strftime("%Y-%m-%d")
+                                "acq_date": acq_date_str
                             }
                         })
                         if len(thermal_points) >= 100:
@@ -360,7 +369,7 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
                 "в регионе отсутствуют ввиду отрицательных температур и наличия снежного покрова. "
                 "Активных очагов горения и следов гарей не зафиксировано (0 га)."
             )
-        elif region_key is None or assigned_region == "out_of_coverage":
+        elif is_out_of_coverage or region_key is None or assigned_region == "out_of_coverage":
             summary_message = (
                 "Запрошенный BBox находится за пределами зоны покрытия доступных космических сцен высокого разрешения "
                 "(система поддерживает мониторинг южных регионов: Волгоградская, Ростовская, Астраханская области и Республика Калмыкия). "
@@ -368,8 +377,8 @@ def process_spatial_analysis_task(task_id: str, req: SpatialTemporalRequest):
             )
         elif total_ha == 0.0 and len(thermal_points) == 0:
             summary_message = (
-                "По результатам спектрального анализа Sentinel-2, Sentinel-1 и VIIRS в границах выбранного участка "
-                "активных термических аномалий и свежих гарей не обнаружено (0 га). Территория не пострадала от огня."
+                "За выбранный период на данной территории термических аномалий и свежих гарей не зафиксировано (0 га). "
+                "По спектральным данным Sentinel-2, Sentinel-1 и VIIRS следов активного горения не обнаружено."
             )
         else:
             reg_title = REGION_COVERAGE.get(assigned_region, {}).get("name", assigned_region)
